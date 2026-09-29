@@ -1,0 +1,38 @@
+name: Test Self Hosted Runner
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test-runner:
+    runs-on: [self-hosted, linux, x64, onprem]
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v6
+
+      - name: Show Runner Information
+        run: |
+          echo "Hostname:"
+          hostname
+
+          echo "User:"
+          whoami
+
+          echo "Working Directory:"
+          pwd
+
+      - name: Check Git
+        run: |
+          git --version
+
+      - name: Check Docker
+        run: |
+          docker --version
+
+      - name: Check Kubectl
+        run: |
+          kubectl version --client

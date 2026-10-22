@@ -1,4 +1,5 @@
-name: EduAdmin Build, SonarQube and Artifacts
+
+name: EduAdmin Build, SonarQube, Artifacts and ACR
 
 on:
   push:
@@ -15,6 +16,8 @@ permissions:
 env:
   DOTNET_VERSION: '8.0'
   NODE_VERSION: '22'
+  ACR_NAME: reenaacr1
+  ACR_LOGIN_SERVER: reenaacr1.azurecr.io
 
 jobs:
 
@@ -32,23 +35,19 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install .NET 8 in runner workspace
+      - name: Install .NET 8
         run: |
           mkdir -p "$RUNNER_TEMP/dotnet"
-
           curl -fsSL https://dot.net/v1/dotnet-install.sh \
             -o "$RUNNER_TEMP/dotnet-install.sh"
-
           bash "$RUNNER_TEMP/dotnet-install.sh" \
             --channel 8.0 \
             --install-dir "$RUNNER_TEMP/dotnet"
-
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
 
       - name: Verify .NET SDK
-        run: |
-          "$RUNNER_TEMP/dotnet/dotnet" --info
+        run: "$RUNNER_TEMP/dotnet/dotnet" --info
 
       - name: Restore dependencies
         run: dotnet restore StudentAPI.csproj
@@ -57,7 +56,8 @@ jobs:
         run: dotnet build StudentAPI.csproj --configuration Release --no-restore
 
       - name: Test API
-        run: dotnet test StudentAPI.csproj --configuration Release --no-build
+        run: dotnet test StudentAPI.csproj --configuration Release
+
 
   # Stage 2: Build Angular frontend
   build-frontend:
@@ -88,6 +88,7 @@ jobs:
         working-directory: student-app
         run: npm run build
 
+
   # Stage 3: SonarQube analysis for .NET API
   sonar-api:
     name: SonarQube API Analysis
@@ -103,27 +104,22 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install .NET 8 in runner workspace
+      - name: Install .NET 8
         run: |
           mkdir -p "$RUNNER_TEMP/dotnet"
-
           curl -fsSL https://dot.net/v1/dotnet-install.sh \
             -o "$RUNNER_TEMP/dotnet-install.sh"
-
           bash "$RUNNER_TEMP/dotnet-install.sh" \
             --channel 8.0 \
             --install-dir "$RUNNER_TEMP/dotnet"
-
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
 
       - name: Install SonarScanner for .NET
         run: |
           mkdir -p "$RUNNER_TEMP/dotnet-tools"
-
           dotnet tool install dotnet-sonarscanner \
             --tool-path "$RUNNER_TEMP/dotnet-tools"
-
           echo "$RUNNER_TEMP/dotnet-tools" >> "$GITHUB_PATH"
 
       - name: Restore dependencies
@@ -146,9 +142,8 @@ jobs:
       - name: End SonarQube analysis
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_API }}
-        run: |
-          dotnet sonarscanner end \
-            /d:sonar.token="$SONAR_TOKEN"
+        run: dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
+
 
   # Stage 4: SonarQube analysis for Angular
   sonar-frontend:
@@ -187,6 +182,7 @@ jobs:
             -Dsonar.projectName=EduAdmin-Frontend
             -Dsonar.qualitygate.wait=true
 
+
   # Stage 5: Wait for both SonarQube jobs
   sonar-gate:
     name: SonarQube Pipeline Gate
@@ -199,7 +195,8 @@ jobs:
       - name: Confirm analysis succeeded
         run: echo "Both builds and SonarQube analyses succeeded."
 
-  # Stage 6: Publish build artifacts to GitHub Actions
+
+  # Stage 6: Publish artifacts to GitHub Actions
   upload-artifacts:
     name: Upload Build Artifacts to GitHub
     runs-on: [self-hosted, Linux, X64]
@@ -209,17 +206,14 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install .NET 8 in runner workspace
+      - name: Install .NET 8
         run: |
           mkdir -p "$RUNNER_TEMP/dotnet"
-
           curl -fsSL https://dot.net/v1/dotnet-install.sh \
             -o "$RUNNER_TEMP/dotnet-install.sh"
-
           bash "$RUNNER_TEMP/dotnet-install.sh" \
             --channel 8.0 \
             --install-dir "$RUNNER_TEMP/dotnet"
-
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
 
@@ -227,7 +221,6 @@ jobs:
         working-directory: StudentAPI/StudentAPI/StudentAPI
         run: |
           dotnet restore StudentAPI.csproj
-
           dotnet publish StudentAPI.csproj \
             --configuration Release \
             --output "${{ github.workspace }}/artifacts/api"
@@ -266,21 +259,39 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-  # Stage 7: Build and push Docker images to ACR
+
+  # Stage 7: Install Azure CLI, authenticate and push images
   build-and-push-acr:
-    name: Build and Push Images to ACR
+    name: Build and Push Docker Images to ACR
     runs-on: [self-hosted, Linux, X64]
     needs: upload-artifacts
 
+    # Only push images after a push to main, not on PRs.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     env:
-      ACR_LOGIN_SERVER: reenaacr1.azurecr.io
       IMAGE_TAG: ${{ github.sha }}
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+
+      - name: Install Azure CLI if missing
+        run: |
+          set -euo pipefail
+
+          if ! command -v az >/dev/null 2>&1; then
+            echo "Azure CLI not found. Installing..."
+
+            curl -fsSL https://aka.ms/InstallAzureCLIDeb \
+              -o "$RUNNER_TEMP/install-azure-cli.sh"
+
+            sudo bash "$RUNNER_TEMP/install-azure-cli.sh"
+          else
+            echo "Azure CLI is already installed."
+          fi
+
+          az version
 
       - name: Verify Docker
         run: docker version
@@ -291,43 +302,45 @@ jobs:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Login to ACR
-        run: az acr login --name reenaacr1
+        run: az acr login --name "$ACR_NAME"
+        env:
+          ACR_NAME: ${{ env.ACR_NAME }}
 
-      - name: Build API image
+      - name: Build API Docker image
         run: |
           docker build \
-            -t "$ACR_LOGIN_SERVER/studentapi:$IMAGE_TAG" \
-            -t "$ACR_LOGIN_SERVER/studentapi:latest" \
+            -t "${ACR_LOGIN_SERVER}/studentapi:${IMAGE_TAG}" \
+            -t "${ACR_LOGIN_SERVER}/studentapi:latest" \
             -f StudentAPI/StudentAPI/StudentAPI/Dockerfile \
             StudentAPI/StudentAPI/StudentAPI
 
-      - name: Build Angular image
+      - name: Build Angular Docker image
         run: |
           docker build \
-            -t "$ACR_LOGIN_SERVER/studentapp:$IMAGE_TAG" \
-            -t "$ACR_LOGIN_SERVER/studentapp:latest" \
+            -t "${ACR_LOGIN_SERVER}/studentapp:${IMAGE_TAG}" \
+            -t "${ACR_LOGIN_SERVER}/studentapp:latest" \
             -f student-app/Dockerfile \
             student-app
 
       - name: Push API image
         run: |
-          docker push "$ACR_LOGIN_SERVER/studentapi:$IMAGE_TAG"
-          docker push "$ACR_LOGIN_SERVER/studentapi:latest"
+          docker push "${ACR_LOGIN_SERVER}/studentapi:${IMAGE_TAG}"
+          docker push "${ACR_LOGIN_SERVER}/studentapi:latest"
 
       - name: Push Angular image
         run: |
-          docker push "$ACR_LOGIN_SERVER/studentapp:$IMAGE_TAG"
-          docker push "$ACR_LOGIN_SERVER/studentapp:latest"
+          docker push "${ACR_LOGIN_SERVER}/studentapp:${IMAGE_TAG}"
+          docker push "${ACR_LOGIN_SERVER}/studentapp:latest"
 
-      - name: Verify images in ACR
+      - name: Verify repositories in ACR
         run: |
           az acr repository list \
-            --name reenaacr1 \
+            --name "$ACR_NAME" \
             --output table
 
       - name: Azure Logout
         if: always()
-        run: az logout
-
-
-
+        run: |
+          if command -v az >/dev/null 2>&1; then
+            az logout || true
+          fi

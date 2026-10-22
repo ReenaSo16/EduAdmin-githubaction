@@ -50,7 +50,7 @@ jobs:
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
 
       - name: Verify .NET SDK
-        run: "$RUNNER_TEMP/dotnet/dotnet" --info
+        run: '"$RUNNER_TEMP/dotnet/dotnet" --info'
 
       - name: Restore dependencies
         run: dotnet restore StudentAPI.csproj

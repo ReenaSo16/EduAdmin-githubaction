@@ -188,3 +188,63 @@ jobs:
     steps:
       - name: Confirm build and analysis succeeded
         run: echo "Both builds and SonarQube analyses succeeded."
+
+  
+  upload-artifacts:
+    name: Upload Build Artifacts to GitHub
+    runs-on: [self-hosted, Linux, X64]
+    needs:
+      - sonar-gate
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install .NET 8 in runner workspace
+        shell: bash
+        run: |
+          mkdir -p "$RUNNER_TEMP/dotnet"
+          curl -fsSL https://dot.net/v1/dotnet-install.sh \
+            -o "$RUNNER_TEMP/dotnet-install.sh"
+          bash "$RUNNER_TEMP/dotnet-install.sh" \
+            --channel 8.0 \
+            --install-dir "$RUNNER_TEMP/dotnet"
+
+          echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
+          echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
+
+      - name: Publish .NET API
+        working-directory: StudentAPI/StudentAPI/StudentAPI
+        run: |
+          dotnet restore StudentAPI.csproj
+          dotnet publish StudentAPI.csproj \
+            --configuration Release \
+            --output "${{ github.workspace }}/artifacts/api"
+
+      - name: Build Angular frontend
+        working-directory: student-app
+        run: |
+          npm ci
+          npm run build
+
+      - name: Copy Angular build output
+        run: |
+          mkdir -p artifacts/frontend
+          cp -r student-app/dist/student-app/browser/. artifacts/frontend/
+
+      - name: Upload API artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eduadmin-api
+          path: artifacts/api/
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload Angular artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eduadmin-frontend
+          path: artifacts/frontend/
+          retention-days: 7
+          if-no-files-found: error
+      

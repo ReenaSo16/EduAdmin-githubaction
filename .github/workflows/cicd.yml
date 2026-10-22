@@ -1,0 +1,128 @@
+
+name: EduAdmin Build and SonarQube
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-api:
+    name: Build and Test .NET API
+    runs-on: [self-hosted, Linux, X64]
+
+    defaults:
+      run:
+        working-directory: StudentAPI/StudentAPI/StudentAPI
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Restore dependencies
+        run: dotnet restore StudentAPI.csproj
+
+      - name: Build API
+        run: dotnet build StudentAPI.csproj --configuration Release --no-restore
+
+      - name: Test API
+        run: dotnet test StudentAPI.csproj --configuration Release --no-build
+
+  build-frontend:
+    name: Build Angular Frontend
+    runs-on: [self-hosted, Linux, X64]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: student-app/package-lock.json
+
+      - name: Install dependencies
+        working-directory: student-app
+        run: npm ci
+
+      - name: Build Angular
+        working-directory: student-app
+        run: npm run build
+
+  sonar-api:
+    name: SonarQube .NET API
+    runs-on: [self-hosted, Linux, X64]
+    needs: build-api
+
+    defaults:
+      run:
+        working-directory: StudentAPI/StudentAPI/StudentAPI
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 8
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Install SonarScanner for .NET
+        run: dotnet tool install --global dotnet-sonarscanner
+
+      - name: Add dotnet tools to PATH
+        run: echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      - name: Begin SonarQube analysis
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_API }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          dotnet sonarscanner begin \
+            /k:"EduAdmin-API" \
+            /d:sonar.host.url="$SONAR_HOST_URL" \
+            /d:sonar.token="$SONAR_TOKEN"
+
+      - name: Build for SonarQube
+        run: dotnet build StudentAPI.csproj --configuration Release
+
+      - name: End SonarQube analysis
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_API }}
+        run: dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
+
+  sonar-frontend:
+    name: SonarQube Angular Frontend
+    runs-on: [self-hosted, Linux, X64]
+    needs: build-frontend
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Run SonarQube Scanner
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_FRONTEND }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          dotnet tool install --global dotnet-sonarscanner
+          export PATH="$HOME/.dotnet/tools:$PATH"
+
+          dotnet sonarscanner begin \
+            /k:"EduAdmin-Frontend" \
+            /d:sonar.host.url="$SONAR_HOST_URL" \
+            /d:sonar.token="$SONAR_TOKEN"
+
+          dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"

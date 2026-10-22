@@ -1,4 +1,5 @@
-name: EduAdmin Build and SonarQube
+name: EduAdmin Build, SonarQube and Artifacts
+
 on:
   push:
     branches:
@@ -32,11 +33,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install .NET 8 in runner workspace
-        shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/dotnet"
+
           curl -fsSL https://dot.net/v1/dotnet-install.sh \
             -o "$RUNNER_TEMP/dotnet-install.sh"
+
           bash "$RUNNER_TEMP/dotnet-install.sh" \
             --channel 8.0 \
             --install-dir "$RUNNER_TEMP/dotnet"
@@ -73,6 +75,11 @@ jobs:
           cache: npm
           cache-dependency-path: student-app/package-lock.json
 
+      - name: Verify Node and npm
+        run: |
+          node --version
+          npm --version
+
       - name: Install dependencies
         working-directory: student-app
         run: npm ci
@@ -97,11 +104,12 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install .NET 8 in runner workspace
-        shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/dotnet"
+
           curl -fsSL https://dot.net/v1/dotnet-install.sh \
             -o "$RUNNER_TEMP/dotnet-install.sh"
+
           bash "$RUNNER_TEMP/dotnet-install.sh" \
             --channel 8.0 \
             --install-dir "$RUNNER_TEMP/dotnet"
@@ -112,8 +120,10 @@ jobs:
       - name: Install SonarScanner for .NET
         run: |
           mkdir -p "$RUNNER_TEMP/dotnet-tools"
+
           dotnet tool install dotnet-sonarscanner \
             --tool-path "$RUNNER_TEMP/dotnet-tools"
+
           echo "$RUNNER_TEMP/dotnet-tools" >> "$GITHUB_PATH"
 
       - name: Restore dependencies
@@ -130,7 +140,7 @@ jobs:
             /d:sonar.token="$SONAR_TOKEN" \
             /d:sonar.qualitygate.wait=true
 
-      - name: Build for analysis
+      - name: Build for SonarQube
         run: dotnet build StudentAPI.csproj --configuration Release
 
       - name: End SonarQube analysis
@@ -177,7 +187,7 @@ jobs:
             -Dsonar.projectName=EduAdmin-Frontend
             -Dsonar.qualitygate.wait=true
 
-  # Stage 5: Verify both SonarQube jobs succeeded
+  # Stage 5: Wait for both SonarQube jobs
   sonar-gate:
     name: SonarQube Pipeline Gate
     runs-on: [self-hosted, Linux, X64]
@@ -186,26 +196,26 @@ jobs:
       - sonar-frontend
 
     steps:
-      - name: Confirm build and analysis succeeded
+      - name: Confirm analysis succeeded
         run: echo "Both builds and SonarQube analyses succeeded."
 
-  
+  # Stage 6: Publish build artifacts to GitHub Actions
   upload-artifacts:
     name: Upload Build Artifacts to GitHub
     runs-on: [self-hosted, Linux, X64]
-    needs:
-      - sonar-gate
+    needs: sonar-gate
 
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Install .NET 8 in runner workspace
-        shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/dotnet"
+
           curl -fsSL https://dot.net/v1/dotnet-install.sh \
             -o "$RUNNER_TEMP/dotnet-install.sh"
+
           bash "$RUNNER_TEMP/dotnet-install.sh" \
             --channel 8.0 \
             --install-dir "$RUNNER_TEMP/dotnet"
@@ -217,9 +227,17 @@ jobs:
         working-directory: StudentAPI/StudentAPI/StudentAPI
         run: |
           dotnet restore StudentAPI.csproj
+
           dotnet publish StudentAPI.csproj \
             --configuration Release \
             --output "${{ github.workspace }}/artifacts/api"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: student-app/package-lock.json
 
       - name: Build Angular frontend
         working-directory: student-app
@@ -247,4 +265,3 @@ jobs:
           path: artifacts/frontend/
           retention-days: 7
           if-no-files-found: error
-      

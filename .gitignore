@@ -30,3 +30,6 @@ student-app/dist/
 # OS Files
 .DS_Store
 Thumbs.db
+
+k8s/sqlserver-secret.yaml
+k8s/secret.yaml

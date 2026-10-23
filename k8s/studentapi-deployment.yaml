@@ -1,4 +1,4 @@
-# 
+
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,23 +19,31 @@ spec:
           image: reenaacr1.azurecr.io/studentapi:latest
           imagePullPolicy: Always
           ports:
-            - containerPort: 5000
+            - name: http
+              containerPort: 5000
           envFrom:
             - configMapRef:
                 name: student-config
           env:
-            - name: DB_SERVER
+            - name: ConnectionStrings__DefaultConnection
               valueFrom:
                 secretKeyRef:
                   name: student-db-secret
-                  key: DB_SERVER
-            - name: DB_USER
-              valueFrom:
-                secretKeyRef:
-                  name: student-db-secret
-                  key: DB_USER
-            - name: DB_PASSWORD
-              valueFrom:
-                secretKeyRef:
-                  name: student-db-secret
-                  key: DB_PASSWORD
+                  key: ConnectionStrings__DefaultConnection
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+          readinessProbe:
+            tcpSocket:
+              port: 5000
+            initialDelaySeconds: 15
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: 5000
+            initialDelaySeconds: 30
+            periodSeconds: 20

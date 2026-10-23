@@ -357,3 +357,180 @@ jobs:
           if command -v az >/dev/null 2>&1; then
             az logout || true
           fi
+
+
+  deploy-aks:
+    name: Deploy SQL Server, DACPAC and Application
+    runs-on: [self-hosted, Linux, X64]
+    needs: build-and-push-acr
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+    env:
+      AKS_RESOURCE_GROUP: rg-github-runner-lab
+      AKS_CLUSTER_NAME: aks-eduadmin-lab
+      NAMESPACE: student
+      ACR_LOGIN_SERVER: reenaacr1.azurecr.io
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Azure Login
+        uses: azure/login@v3
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Get AKS credentials
+        shell: bash
+        run: |
+          set -euo pipefail
+          az aks get-credentials \
+            --resource-group "$AKS_RESOURCE_GROUP" \
+            --name "$AKS_CLUSTER_NAME" \
+            --overwrite-existing
+
+          kubectl get nodes
+          kubectl get namespace "$NAMESPACE"
+
+      - name: Create or update Kubernetes configuration and secrets
+        shell: bash
+        env:
+          SQLSERVER_SA_PASSWORD: ${{ secrets.SQLSERVER_SA_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          test -n "$SQLSERVER_SA_PASSWORD"
+
+          kubectl apply -f k8s/configmap.yaml
+
+          kubectl create secret generic sqlserver-secret \
+            --namespace "$NAMESPACE" \
+            --from-literal=ACCEPT_EULA=Y \
+            --from-literal=MSSQL_PID=Developer \
+            --from-literal=MSSQL_SA_PASSWORD="$SQLSERVER_SA_PASSWORD" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          kubectl create secret generic student-db-secret \
+            --namespace "$NAMESPACE" \
+            --from-literal="ConnectionStrings__DefaultConnection=Server=sqlserver-service,1433;Database=StudentDB;User Id=sa;Password=${SQLSERVER_SA_PASSWORD};TrustServerCertificate=True;Encrypt=True;" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Deploy SQL Server
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl apply -f k8s/sqlserver-pvc.yaml
+          kubectl apply -f k8s/sqlserver-service.yaml
+          kubectl apply -f k8s/sqlserver-deployment.yaml
+
+          kubectl rollout status statefulset/sqlserver \
+            --namespace "$NAMESPACE" \
+            --timeout=10m
+
+          kubectl get pods,pvc,service -n "$NAMESPACE"
+
+      - name: Install .NET SDK for SqlPackage
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          export DOTNET_ROOT="$RUNNER_TEMP/dotnet"
+          mkdir -p "$DOTNET_ROOT"
+
+          curl -fsSL https://dot.net/v1/dotnet-install.sh \
+            -o "$RUNNER_TEMP/dotnet-install.sh"
+
+          bash "$RUNNER_TEMP/dotnet-install.sh" \
+            --channel 8.0 \
+            --install-dir "$DOTNET_ROOT"
+
+          echo "$DOTNET_ROOT" >> "$GITHUB_PATH"
+          echo "$DOTNET_ROOT" >> "$GITHUB_ENV"
+
+      - name: Install SqlPackage
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet tool install microsoft.sqlpackage \
+            --tool-path "$RUNNER_TEMP/sqlpackage"
+
+          echo "$RUNNER_TEMP/sqlpackage" >> "$GITHUB_PATH"
+
+      - name: Publish StudentDB DACPAC to SQL Server
+        shell: bash
+        env:
+          SQLSERVER_SA_PASSWORD: ${{ secrets.SQLSERVER_SA_PASSWORD }}
+        run: |
+          set -euo pipefail
+
+          test -f Database/StudentDB.dacpac
+
+          kubectl port-forward \
+            --namespace "$NAMESPACE" \
+            service/sqlserver-service 1433:1433 \
+            > "$RUNNER_TEMP/sqlserver-port-forward.log" 2>&1 &
+
+          PF_PID=$!
+          trap 'kill "$PF_PID" 2>/dev/null || true' EXIT
+
+          READY=false
+          for i in $(seq 1 60); do
+            if bash -c 'echo > /dev/tcp/127.0.0.1/1433' 2>/dev/null; then
+              READY=true
+              break
+            fi
+
+            if ! kill -0 "$PF_PID" 2>/dev/null; then
+              cat "$RUNNER_TEMP/sqlserver-port-forward.log"
+              exit 1
+            fi
+
+            sleep 5
+          done
+
+          if [ "$READY" != "true" ]; then
+            cat "$RUNNER_TEMP/sqlserver-port-forward.log"
+            echo "SQL Server port-forward did not become ready."
+            exit 1
+          fi
+
+          "$RUNNER_TEMP/sqlpackage/sqlpackage" \
+            /Action:Publish \
+            /SourceFile:"Database/StudentDB.dacpac" \
+            "/TargetConnectionString:Server=127.0.0.1,1433;Initial Catalog=StudentDB;User ID=sa;Password=${SQLSERVER_SA_PASSWORD};Encrypt=True;TrustServerCertificate=True;Connection Timeout=30;" \
+            /p:BlockOnPossibleDataLoss=True \
+            /p:DropObjectsNotInSource=False
+
+      - name: Deploy Student API
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl apply -f k8s/studentapi-service.yaml
+          kubectl apply -f k8s/studentapi-deployment.yaml
+
+          kubectl rollout status deployment/studentapi \
+            --namespace "$NAMESPACE" \
+            --timeout=5m
+
+      - name: Deploy Angular frontend
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl apply -f k8s/studentapp-service.yaml
+          kubectl apply -f k8s/studentapp-deployment.yaml
+
+          kubectl rollout status deployment/studentapp \
+            --namespace "$NAMESPACE" \
+            --timeout=5m
+
+      - name: Verify deployment
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl get pods,services,pvc -n "$NAMESPACE"
+          kubectl get deployments,statefulsets -n "$NAMESPACE"

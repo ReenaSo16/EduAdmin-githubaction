@@ -1,7 +1,7 @@
 
 name: EduAdmin CI-CD - On-Prem Kubernetes
 
-# Jobs target the self-hosted runner labelled "onprem".
+# Jobs target the registered self-hosted Linux x64 runner.
 on:
   push:
     branches:
@@ -25,7 +25,7 @@ jobs:
   # Stage 1: Build and test .NET API
   build-api:
     name: Build and Test .NET API
-    runs-on: [self-hosted, Linux, X64, onprem]
+    runs-on: [self-hosted, Linux, X64]
 
     defaults:
       run:
@@ -33,6 +33,7 @@ jobs:
         working-directory: StudentAPI/StudentAPI/StudentAPI
 
     steps:
+    
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -66,7 +67,7 @@ jobs:
   # Stage 2: Build Angular frontend
   build-frontend:
     name: Build Angular Frontend
-    runs-on: [self-hosted, Linux, X64, onprem]
+    runs-on: [self-hosted, Linux, X64]
 
     steps:
       - name: Checkout code
@@ -96,7 +97,7 @@ jobs:
   # Stage 3: SonarQube analysis for .NET API
   sonar-api:
     name: SonarQube API Analysis
-    runs-on: [self-hosted, Linux, X64, onprem]
+    runs-on: [self-hosted, Linux, X64]
     needs: build-api
 
     defaults:
@@ -159,7 +160,7 @@ jobs:
   # Stage 4: SonarQube analysis for Angular
   sonar-frontend:
     name: SonarQube Frontend Analysis
-    runs-on: [self-hosted, Linux, X64, onprem]
+    runs-on: [self-hosted, Linux, X64]
     needs: build-frontend
 
     steps:
@@ -197,7 +198,7 @@ jobs:
   # Stage 5: Wait for both SonarQube jobs
   sonar-gate:
     name: SonarQube Pipeline Gate
-    runs-on: [self-hosted, Linux, X64, onprem]
+    runs-on: [self-hosted, Linux, X64]
     needs:
       - sonar-api
       - sonar-frontend
@@ -210,7 +211,7 @@ jobs:
   # Stage 6: Publish build artifacts to GitHub Actions
   upload-artifacts:
     name: Upload Build Artifacts to GitHub
-    runs-on: [self-hosted, Linux, X64, onprem]
+    runs-on: [self-hosted, Linux, X64]
     needs: sonar-gate
 
     steps:
@@ -278,7 +279,7 @@ jobs:
   # Stage 7: Build and push Docker images to ACR
   build-and-push-acr:
     name: Build and Push Docker Images to ACR
-    runs-on: [self-hosted, Linux, X64, onprem]
+    runs-on: [self-hosted, Linux, X64]
     needs: upload-artifacts
 
     # Run this job only for a push to main, not for pull requests.
@@ -362,7 +363,7 @@ jobs:
 
   deploy-onprem:
     name: Deploy SQL Server, DACPAC and Application to on-prem Kubernetes
-    runs-on: [self-hosted, Linux, X64, onprem]
+    runs-on: [self-hosted, Linux, X64]
     needs: build-and-push-acr
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 

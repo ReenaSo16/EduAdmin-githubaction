@@ -1,12 +1,4 @@
-# 
-
-
-
-
-
-
-name: EduAdmin CI-CD - On-Prem Kubernetes
-
+name: EduAdmin Build and SonarQube
 on:
   push:
     branches:
@@ -39,7 +31,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install .NET 8
+      - name: Install .NET 8 in runner workspace
+        shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/dotnet"
           curl -fsSL https://dot.net/v1/dotnet-install.sh \
@@ -49,10 +42,9 @@ jobs:
             --install-dir "$RUNNER_TEMP/dotnet"
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
-
       - name: Verify .NET SDK
-        run: dotnet --info
-
+        run: |
+          "$RUNNER_TEMP/dotnet/dotnet" --info
       - name: Restore dependencies
         run: dotnet restore StudentAPI.csproj
 
@@ -60,8 +52,7 @@ jobs:
         run: dotnet build StudentAPI.csproj --configuration Release --no-restore
 
       - name: Test API
-        run: dotnet test StudentAPI.csproj --configuration Release
-
+        run: dotnet test StudentAPI.csproj --configuration Release --no-build
 
   # Stage 2: Build Angular frontend
   build-frontend:
@@ -87,7 +78,6 @@ jobs:
         working-directory: student-app
         run: npm run build
 
-
   # Stage 3: SonarQube analysis for .NET API
   sonar-api:
     name: SonarQube API Analysis
@@ -103,7 +93,8 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install .NET 8
+      - name: Install .NET 8 in runner workspace
+        shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/dotnet"
           curl -fsSL https://dot.net/v1/dotnet-install.sh \
@@ -113,14 +104,12 @@ jobs:
             --install-dir "$RUNNER_TEMP/dotnet"
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
-
       - name: Install SonarScanner for .NET
         run: |
           mkdir -p "$RUNNER_TEMP/dotnet-tools"
           dotnet tool install dotnet-sonarscanner \
             --tool-path "$RUNNER_TEMP/dotnet-tools"
           echo "$RUNNER_TEMP/dotnet-tools" >> "$GITHUB_PATH"
-
       - name: Restore dependencies
         run: dotnet restore StudentAPI.csproj
 
@@ -134,8 +123,7 @@ jobs:
             /d:sonar.host.url="$SONAR_HOST_URL" \
             /d:sonar.token="$SONAR_TOKEN" \
             /d:sonar.qualitygate.wait=true
-
-      - name: Build for SonarQube
+      - name: Build for analysis
         run: dotnet build StudentAPI.csproj --configuration Release
 
       - name: End SonarQube analysis
@@ -144,8 +132,6 @@ jobs:
         run: |
           dotnet sonarscanner end \
             /d:sonar.token="$SONAR_TOKEN"
-
-
   # Stage 4: SonarQube analysis for Angular
   sonar-frontend:
     name: SonarQube Frontend Analysis
@@ -172,7 +158,7 @@ jobs:
         run: npm run build
 
       - name: SonarQube scan
-        uses: SonarSource/sonarqube-scan-action@v6
+        uses: SonarSource/sonarqube-scan-action@v5
         env:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_FRONTEND }}
@@ -182,9 +168,7 @@ jobs:
             -Dsonar.projectKey=EduAdmin-Frontend
             -Dsonar.projectName=EduAdmin-Frontend
             -Dsonar.qualitygate.wait=true
-
-
-  # Stage 5: Confirm both analyses completed
+  # Stage 5: Verify both SonarQube jobs succeeded
   sonar-gate:
     name: SonarQube Pipeline Gate
     runs-on: [self-hosted, Linux, X64]
@@ -193,6 +177,5 @@ jobs:
       - sonar-frontend
 
     steps:
-      - name: Confirm analysis succeeded
+      - name: Confirm build and analysis succeeded
         run: echo "Both builds and SonarQube analyses succeeded."
-

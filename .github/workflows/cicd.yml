@@ -1,6 +1,7 @@
 
-name: EduAdmin Build, SonarQube, Artifacts and ACR
+name: EduAdmin CI-CD - On-Prem Kubernetes
 
+# Jobs target the self-hosted runner labelled "onprem".
 on:
   push:
     branches:
@@ -24,7 +25,7 @@ jobs:
   # Stage 1: Build and test .NET API
   build-api:
     name: Build and Test .NET API
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, onprem]
 
     defaults:
       run:
@@ -65,7 +66,7 @@ jobs:
   # Stage 2: Build Angular frontend
   build-frontend:
     name: Build Angular Frontend
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, onprem]
 
     steps:
       - name: Checkout code
@@ -95,7 +96,7 @@ jobs:
   # Stage 3: SonarQube analysis for .NET API
   sonar-api:
     name: SonarQube API Analysis
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, onprem]
     needs: build-api
 
     defaults:
@@ -158,7 +159,7 @@ jobs:
   # Stage 4: SonarQube analysis for Angular
   sonar-frontend:
     name: SonarQube Frontend Analysis
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, onprem]
     needs: build-frontend
 
     steps:
@@ -196,7 +197,7 @@ jobs:
   # Stage 5: Wait for both SonarQube jobs
   sonar-gate:
     name: SonarQube Pipeline Gate
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, onprem]
     needs:
       - sonar-api
       - sonar-frontend
@@ -209,7 +210,7 @@ jobs:
   # Stage 6: Publish build artifacts to GitHub Actions
   upload-artifacts:
     name: Upload Build Artifacts to GitHub
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, onprem]
     needs: sonar-gate
 
     steps:
@@ -274,10 +275,10 @@ jobs:
           if-no-files-found: error
 
 
-  # Stage 7: Install Azure CLI, login and push Docker images to ACR
+  # Stage 7: Build and push Docker images to ACR
   build-and-push-acr:
     name: Build and Push Docker Images to ACR
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, onprem]
     needs: upload-artifacts
 
     # Run this job only for a push to main, not for pull requests.
@@ -359,63 +360,51 @@ jobs:
           fi
 
 
-  deploy-aks:
-    name: Deploy SQL Server, DACPAC and Application
-    runs-on: [self-hosted, Linux, X64]
+  deploy-onprem:
+    name: Deploy SQL Server, DACPAC and Application to on-prem Kubernetes
+    runs-on: [self-hosted, Linux, X64, onprem]
     needs: build-and-push-acr
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
 
     env:
-      AKS_RESOURCE_GROUP: rg-github-runner-lab
-      AKS_CLUSTER_NAME: aks-eduadmin-lab
       NAMESPACE: student
       ACR_LOGIN_SERVER: reenaacr1.azurecr.io
+      IMAGE_TAG: ${{ github.sha }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Azure Login
-        uses: azure/login@v3
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Install kubectl and kubelogin
+      - name: Verify on-prem Kubernetes access
         shell: bash
         run: |
           set -euo pipefail
-
-          az aks install-cli \
-            --install-location "$RUNNER_TEMP/kubectl" \
-            --kubelogin-install-location "$RUNNER_TEMP/kubelogin"
-
-          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
-
-          "$RUNNER_TEMP/kubectl" version --client
-          "$RUNNER_TEMP/kubelogin" --version      
-
-      - name: Get AKS credentials
-        shell: bash
-        run: |
-          set -euo pipefail
-          az aks get-credentials \
-            --resource-group "$AKS_RESOURCE_GROUP" \
-            --name "$AKS_CLUSTER_NAME" \
-            --overwrite-existing
-
+          command -v kubectl
+          kubectl version --client
           kubectl get nodes
-          kubectl get namespace "$NAMESPACE"
+          kubectl get namespace "$NAMESPACE" || kubectl create namespace "$NAMESPACE"
 
       - name: Create or update Kubernetes configuration and secrets
         shell: bash
         env:
           SQLSERVER_SA_PASSWORD: ${{ secrets.SQLSERVER_SA_PASSWORD }}
+          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
+          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
         run: |
           set -euo pipefail
 
           test -n "$SQLSERVER_SA_PASSWORD"
+          test -n "$ACR_USERNAME"
+          test -n "$ACR_PASSWORD"
 
           kubectl apply -f k8s/configmap.yaml
+
+          kubectl create secret docker-registry acr-pull-secret \
+            --namespace "$NAMESPACE" \
+            --docker-server="$ACR_LOGIN_SERVER" \
+            --docker-username="$ACR_USERNAME" \
+            --docker-password="$ACR_PASSWORD" \
+            --dry-run=client -o yaml | kubectl apply -f -
 
           kubectl create secret generic sqlserver-secret \
             --namespace "$NAMESPACE" \
@@ -525,6 +514,11 @@ jobs:
           kubectl apply -f k8s/studentapi-service.yaml
           kubectl apply -f k8s/studentapi-deployment.yaml
 
+          kubectl patch deployment studentapi --namespace "$NAMESPACE" --type=merge \
+            -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"acr-pull-secret"}]}}}}'
+          kubectl set image deployment/studentapi studentapi="$ACR_LOGIN_SERVER/studentapi:$IMAGE_TAG" \
+            --namespace "$NAMESPACE"
+
           kubectl rollout status deployment/studentapi \
             --namespace "$NAMESPACE" \
             --timeout=5m
@@ -536,6 +530,11 @@ jobs:
 
           kubectl apply -f k8s/studentapp-service.yaml
           kubectl apply -f k8s/studentapp-deployment.yaml
+
+          kubectl patch deployment studentapp --namespace "$NAMESPACE" --type=merge \
+            -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"acr-pull-secret"}]}}}}'
+          kubectl set image deployment/studentapp studentapp="$ACR_LOGIN_SERVER/studentapp:$IMAGE_TAG" \
+            --namespace "$NAMESPACE"
 
           kubectl rollout status deployment/studentapp \
             --namespace "$NAMESPACE" \

@@ -17,7 +17,6 @@ env:
   NODE_VERSION: '22'
   ACR_NAME: reenaacr1
   ACR_LOGIN_SERVER: reenaacr1.azurecr.io
-  NAMESPACE: student
 
 jobs:
 
@@ -166,28 +165,6 @@ jobs:
         working-directory: student-app
         run: npm run build
 
-      # Test connectivity from the actual GitHub Actions job before invoking the scanner.
-      - name: Check SonarQube connectivity
-        env:
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-        run: |
-          set -euo pipefail
-          test -n "$SONAR_HOST_URL"
-          echo "Checking SonarQube status endpoint..."
-          for attempt in 1 2 3; do
-            if curl --fail --silent --show-error --connect-timeout 10 --max-time 20 \
-              "$SONAR_HOST_URL/api/system/status"; then
-              echo
-              break
-            fi
-            if [ "$attempt" -eq 3 ]; then
-              echo "SonarQube is not reachable from this runner after 3 attempts."
-              exit 1
-            fi
-            echo "Attempt $attempt failed; retrying..."
-            sleep 5
-          done
-
       - name: SonarQube scan
         uses: SonarSource/sonarqube-scan-action@v5
         env:
@@ -196,7 +173,6 @@ jobs:
         with:
           projectBaseDir: student-app
           args: >
-            -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }}
             -Dsonar.projectKey=EduAdmin-Frontend
             -Dsonar.projectName=EduAdmin-Frontend
             -Dsonar.qualitygate.wait=true
@@ -346,95 +322,45 @@ jobs:
           if command -v az >/dev/null 2>&1; then
             az logout || true
           fi
+     
+     
+     
+     
+     
+      # - name: Deploy API
+      #   run: |
+      #     set -euo pipefail
+      #     kubectl apply -f k8s/studentapi-service.yaml --namespace "$NAMESPACE"
+      #     kubectl apply -f k8s/studentapi-deployment.yaml --namespace "$NAMESPACE"
 
-  # Stage 8: Deploy applications to existing on-prem Kubernetes.
-  # SQL Server stays on Windows at 192.168.1.124:1433.
-  deploy-onprem:
-    name: Deploy Application to On-Prem Kubernetes
-    runs-on: [self-hosted, Linux, X64]
-    needs: build-and-push-acr
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-    env:
-      IMAGE_TAG: ${{ github.sha }}
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      #     kubectl patch deployment studentapi --namespace "$NAMESPACE" --type=merge \
+      #       -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"acr-pull-secret"}]}}}}'
 
-      - name: Verify Kubernetes access
-        run: |
-          set -euo pipefail
-          kubectl version --client
-          kubectl get nodes
-          kubectl get namespace "$NAMESPACE" || kubectl create namespace "$NAMESPACE"
+      #     kubectl set image deployment/studentapi \
+      #       studentapi="$ACR_LOGIN_SERVER/studentapi:$IMAGE_TAG" \
+      #       --namespace "$NAMESPACE"
 
-      - name: Configure ConfigMap and database Secret
-        env:
-          SQLSERVER_USERNAME: ${{ secrets.SQLSERVER_USERNAME }}
-          SQLSERVER_PASSWORD: ${{ secrets.SQLSERVER_SA_PASSWORD }}
-        run: |
-          set -euo pipefail
-          test -n "$SQLSERVER_USERNAME"
-          test -n "$SQLSERVER_PASSWORD"
+      #     kubectl rollout status deployment/studentapi \
+      #       --namespace "$NAMESPACE" --timeout=5m
 
-          kubectl apply -f k8s/configmap.yaml --namespace "$NAMESPACE"
+      # - name: Deploy Angular frontend
+      #   run: |
+      #     set -euo pipefail
+      #     kubectl apply -f k8s/studentapp-service.yaml --namespace "$NAMESPACE"
+      #     kubectl apply -f k8s/studentapp-deployment.yaml --namespace "$NAMESPACE"
 
-          CONNECTION_STRING="Server=192.168.1.124,1433;Database=StudentDB;User Id=${SQLSERVER_USERNAME};Password=${SQLSERVER_PASSWORD};Encrypt=True;TrustServerCertificate=True;Connection Timeout=30;"
+      #     kubectl patch deployment studentapp --namespace "$NAMESPACE" --type=merge \
+      #       -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"acr-pull-secret"}]}}}}'
 
-          kubectl create secret generic student-db-secret \
-            --namespace "$NAMESPACE" \
-            --from-literal="ConnectionStrings__DefaultConnection=$CONNECTION_STRING" \
-            --dry-run=client -o yaml | kubectl apply -f -
+      #     kubectl set image deployment/studentapp \
+      #       studentapp="$ACR_LOGIN_SERVER/studentapp:$IMAGE_TAG" \
+      #       --namespace "$NAMESPACE"
 
-      - name: Configure ACR pull Secret
-        env:
-          ACR_USERNAME: ${{ secrets.ACR_USERNAME }}
-          ACR_PASSWORD: ${{ secrets.ACR_PASSWORD }}
-        run: |
-          set -euo pipefail
-          test -n "$ACR_USERNAME"
-          test -n "$ACR_PASSWORD"
+      #     kubectl rollout status deployment/studentapp \
+      #       --namespace "$NAMESPACE" --timeout=5m
 
-          kubectl create secret docker-registry acr-pull-secret \
-            --namespace "$NAMESPACE" \
-            --docker-server="$ACR_LOGIN_SERVER" \
-            --docker-username="$ACR_USERNAME" \
-            --docker-password="$ACR_PASSWORD" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-      - name: Deploy API
-        run: |
-          set -euo pipefail
-          kubectl apply -f k8s/studentapi-service.yaml --namespace "$NAMESPACE"
-          kubectl apply -f k8s/studentapi-deployment.yaml --namespace "$NAMESPACE"
-
-          kubectl patch deployment studentapi --namespace "$NAMESPACE" --type=merge \
-            -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"acr-pull-secret"}]}}}}'
-
-          kubectl set image deployment/studentapi \
-            studentapi="$ACR_LOGIN_SERVER/studentapi:$IMAGE_TAG" \
-            --namespace "$NAMESPACE"
-
-          kubectl rollout status deployment/studentapi \
-            --namespace "$NAMESPACE" --timeout=5m
-
-      - name: Deploy Angular frontend
-        run: |
-          set -euo pipefail
-          kubectl apply -f k8s/studentapp-service.yaml --namespace "$NAMESPACE"
-          kubectl apply -f k8s/studentapp-deployment.yaml --namespace "$NAMESPACE"
-
-          kubectl patch deployment studentapp --namespace "$NAMESPACE" --type=merge \
-            -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"acr-pull-secret"}]}}}}'
-
-          kubectl set image deployment/studentapp \
-            studentapp="$ACR_LOGIN_SERVER/studentapp:$IMAGE_TAG" \
-            --namespace "$NAMESPACE"
-
-          kubectl rollout status deployment/studentapp \
-            --namespace "$NAMESPACE" --timeout=5m
-
-      - name: Verify deployment
-        run: |
-          set -euo pipefail
-          kubectl get pods,services -n "$NAMESPACE"
-          kubectl get deployments -n "$NAMESPACE"
+      # - name: Verify deployment
+      #   run: |
+      #     set -euo pipefail
+      #     kubectl get pods,services -n "$NAMESPACE"
+      #     kubectl get deployments -n "$NAMESPACE"

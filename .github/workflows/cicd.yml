@@ -17,6 +17,7 @@ env:
   NODE_VERSION: '22'
   ACR_NAME: reenaacr1
   ACR_LOGIN_SERVER: reenaacr1.azurecr.io
+  NAMESPACE: student
 
 jobs:
 
@@ -165,6 +166,28 @@ jobs:
         working-directory: student-app
         run: npm run build
 
+      # Test connectivity from the actual GitHub Actions job before invoking the scanner.
+      - name: Check SonarQube connectivity
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          set -euo pipefail
+          test -n "$SONAR_HOST_URL"
+          echo "Checking SonarQube status endpoint..."
+          for attempt in 1 2 3; do
+            if curl --fail --silent --show-error --connect-timeout 10 --max-time 20 \
+              "$SONAR_HOST_URL/api/system/status"; then
+              echo
+              break
+            fi
+            if [ "$attempt" -eq 3 ]; then
+              echo "SonarQube is not reachable from this runner after 3 attempts."
+              exit 1
+            fi
+            echo "Attempt $attempt failed; retrying..."
+            sleep 5
+          done
+
       - name: SonarQube scan
         uses: SonarSource/sonarqube-scan-action@v5
         env:
@@ -173,6 +196,7 @@ jobs:
         with:
           projectBaseDir: student-app
           args: >
+            -Dsonar.host.url=${{ secrets.SONAR_HOST_URL }}
             -Dsonar.projectKey=EduAdmin-Frontend
             -Dsonar.projectName=EduAdmin-Frontend
             -Dsonar.qualitygate.wait=true

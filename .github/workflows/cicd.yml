@@ -1,7 +1,5 @@
-
 name: EduAdmin CI-CD - On-Prem Kubernetes
 
-# Jobs target the registered self-hosted Linux x64 runner.
 on:
   push:
     branches:

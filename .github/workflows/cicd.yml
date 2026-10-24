@@ -17,66 +17,55 @@ env:
   NODE_VERSION: '22'
   ACR_NAME: reenaacr1
   ACR_LOGIN_SERVER: reenaacr1.azurecr.io
-  API_DIR: StudentAPI/StudentAPI/StudentAPI
-  FRONTEND_DIR: student-app
-  NAMESPACE: student
 
 jobs:
+
   # Stage 1: Build and test .NET API
   build-api:
     name: Build and Test .NET API
     runs-on: [self-hosted, Linux, X64]
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: StudentAPI/StudentAPI/StudentAPI
+
     steps:
+    
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Validate API project path
-        shell: bash
-        run: |
-          set -euo pipefail
-          echo "Repository root: $GITHUB_WORKSPACE"
-          find . -maxdepth 6 -type f \( -name '*.csproj' -o -name '*.sln' \) -print
-          test -f "$API_DIR/StudentAPI.csproj"
-
       - name: Install .NET 8
-        shell: bash
         run: |
-          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/dotnet"
-          curl -fsSL https://dot.net/v1/dotnet-install.sh -o "$RUNNER_TEMP/dotnet-install.sh"
-          bash "$RUNNER_TEMP/dotnet-install.sh" --channel 8.0 --install-dir "$RUNNER_TEMP/dotnet"
+          curl -fsSL https://dot.net/v1/dotnet-install.sh \
+            -o "$RUNNER_TEMP/dotnet-install.sh"
+          bash "$RUNNER_TEMP/dotnet-install.sh" \
+            --channel 8.0 \
+            --install-dir "$RUNNER_TEMP/dotnet"
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
+      - name: Verify .NET SDK
+        run: '"$RUNNER_TEMP/dotnet/dotnet" --info'
 
-      - name: Restore API dependencies
-        working-directory: StudentAPI/StudentAPI/StudentAPI
+      - name: Restore dependencies
         run: dotnet restore StudentAPI.csproj
 
       - name: Build API
-        working-directory: StudentAPI/StudentAPI/StudentAPI
         run: dotnet build StudentAPI.csproj --configuration Release --no-restore
 
       - name: Test API
-        working-directory: StudentAPI/StudentAPI/StudentAPI
         run: dotnet test StudentAPI.csproj --configuration Release
+
 
   # Stage 2: Build Angular frontend
   build-frontend:
     name: Build Angular Frontend
     runs-on: [self-hosted, Linux, X64]
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
-
-      - name: Validate frontend path
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -f "$FRONTEND_DIR/package.json" || {
-            echo "package.json not found in $FRONTEND_DIR"
-            find . -maxdepth 6 -name package.json -print
-            exit 1
-          }
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -89,8 +78,7 @@ jobs:
         run: |
           node --version
           npm --version
-
-      - name: Install frontend dependencies
+      - name: Install dependencies
         working-directory: student-app
         run: npm ci
 
@@ -98,57 +86,66 @@ jobs:
         working-directory: student-app
         run: npm run build
 
+
   # Stage 3: SonarQube analysis for .NET API
   sonar-api:
     name: SonarQube API Analysis
     runs-on: [self-hosted, Linux, X64]
     needs: build-api
+
+    defaults:
+      run:
+        shell: bash
+        working-directory: StudentAPI/StudentAPI/StudentAPI
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Install .NET 8
-        shell: bash
         run: |
-          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/dotnet"
-          curl -fsSL https://dot.net/v1/dotnet-install.sh -o "$RUNNER_TEMP/dotnet-install.sh"
-          bash "$RUNNER_TEMP/dotnet-install.sh" --channel 8.0 --install-dir "$RUNNER_TEMP/dotnet"
+          curl -fsSL https://dot.net/v1/dotnet-install.sh \
+            -o "$RUNNER_TEMP/dotnet-install.sh"
+          bash "$RUNNER_TEMP/dotnet-install.sh" \
+            --channel 8.0 \
+            --install-dir "$RUNNER_TEMP/dotnet"
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
-
       - name: Install SonarScanner for .NET
-        run: dotnet tool install dotnet-sonarscanner --tool-path "$RUNNER_TEMP/dotnet-tools"
-
-      - name: Add SonarScanner to PATH
-        run: echo "$RUNNER_TEMP/dotnet-tools" >> "$GITHUB_PATH"
-
-      - name: Restore API dependencies
-        working-directory: StudentAPI/StudentAPI/StudentAPI
+        run: |
+          mkdir -p "$RUNNER_TEMP/dotnet-tools"
+          dotnet tool install dotnet-sonarscanner \
+            --tool-path "$RUNNER_TEMP/dotnet-tools"
+          echo "$RUNNER_TEMP/dotnet-tools" >> "$GITHUB_PATH"
+      - name: Restore dependencies
         run: dotnet restore StudentAPI.csproj
 
-      - name: Begin, build, and end SonarQube analysis
-        working-directory: StudentAPI/StudentAPI/StudentAPI
+      - name: Begin SonarQube analysis
         env:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_API }}
         run: |
-          set -euo pipefail
-          test -n "$SONAR_HOST_URL"
-          test -n "$SONAR_TOKEN"
           dotnet sonarscanner begin \
             /k:"EduAdmin-API" \
             /d:sonar.host.url="$SONAR_HOST_URL" \
             /d:sonar.token="$SONAR_TOKEN" \
             /d:sonar.qualitygate.wait=true
-          dotnet build StudentAPI.csproj --configuration Release
-          dotnet sonarscanner end /d:sonar.token="$SONAR_TOKEN"
+      - name: Build for SonarQube
+        run: dotnet build StudentAPI.csproj --configuration Release
 
-  # Stage 4: SonarQube analysis for Angular frontend
+      - name: End SonarQube analysis
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_API }}
+        run: |
+          dotnet sonarscanner end \
+            /d:sonar.token="$SONAR_TOKEN"
+  # Stage 4: SonarQube analysis for Angular
   sonar-frontend:
     name: SonarQube Frontend Analysis
     runs-on: [self-hosted, Linux, X64]
     needs: build-frontend
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -160,7 +157,7 @@ jobs:
           cache: npm
           cache-dependency-path: student-app/package-lock.json
 
-      - name: Install frontend dependencies
+      - name: Install dependencies
         working-directory: student-app
         run: npm ci
 
@@ -179,41 +176,46 @@ jobs:
             -Dsonar.projectKey=EduAdmin-Frontend
             -Dsonar.projectName=EduAdmin-Frontend
             -Dsonar.qualitygate.wait=true
-
-  # Stage 5: Gate - both SonarQube jobs must pass
+  # Stage 5: Wait for both SonarQube jobs
   sonar-gate:
     name: SonarQube Pipeline Gate
     runs-on: [self-hosted, Linux, X64]
     needs:
       - sonar-api
       - sonar-frontend
-    steps:
-      - name: Confirm analyses and quality gates passed
-        run: echo "Both SonarQube analyses and quality gates succeeded."
 
-  # Stage 6: Publish build artifacts
+    steps:
+      - name: Confirm analysis succeeded
+        run: echo "Both builds and SonarQube analyses succeeded."
+
+
+  # Stage 6: Publish build artifacts to GitHub Actions
   upload-artifacts:
-    name: Upload Build Artifacts
+    name: Upload Build Artifacts to GitHub
     runs-on: [self-hosted, Linux, X64]
     needs: sonar-gate
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
       - name: Install .NET 8
-        shell: bash
         run: |
-          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/dotnet"
-          curl -fsSL https://dot.net/v1/dotnet-install.sh -o "$RUNNER_TEMP/dotnet-install.sh"
-          bash "$RUNNER_TEMP/dotnet-install.sh" --channel 8.0 --install-dir "$RUNNER_TEMP/dotnet"
+          curl -fsSL https://dot.net/v1/dotnet-install.sh \
+            -o "$RUNNER_TEMP/dotnet-install.sh"
+          bash "$RUNNER_TEMP/dotnet-install.sh" \
+            --channel 8.0 \
+            --install-dir "$RUNNER_TEMP/dotnet"
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
-
-      - name: Publish API
+      - name: Publish .NET API
         working-directory: StudentAPI/StudentAPI/StudentAPI
-        run: dotnet publish StudentAPI.csproj --configuration Release --output "${{ github.workspace }}/artifacts/api"
-
+        run: |
+          dotnet restore StudentAPI.csproj
+          dotnet publish StudentAPI.csproj \
+            --configuration Release \
+            --output "${{ github.workspace }}/artifacts/api"
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -224,24 +226,12 @@ jobs:
       - name: Build Angular frontend
         working-directory: student-app
         run: |
-          set -euo pipefail
           npm ci
           npm run build
-
       - name: Copy Angular build output
-        shell: bash
         run: |
-          set -euo pipefail
           mkdir -p artifacts/frontend
-          if [ -d "student-app/dist/student-app/browser" ]; then
-            cp -r student-app/dist/student-app/browser/. artifacts/frontend/
-          elif [ -d "student-app/dist" ]; then
-            cp -r student-app/dist/. artifacts/frontend/
-          else
-            echo "Angular dist output not found; check angular.json outputPath."
-            exit 1
-          fi
-
+          cp -r student-app/dist/student-app/browser/. artifacts/frontend/
       - name: Upload API artifact
         uses: actions/upload-artifact@v4
         with:
@@ -250,7 +240,7 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-      - name: Upload frontend artifact
+      - name: Upload Angular artifact
         uses: actions/upload-artifact@v4
         with:
           name: eduadmin-frontend
@@ -258,23 +248,38 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
+
   # Stage 7: Build and push Docker images to ACR
   build-and-push-acr:
     name: Build and Push Docker Images to ACR
     runs-on: [self-hosted, Linux, X64]
     needs: upload-artifacts
+
+    # Run this job only for a push to main, not for pull requests.
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
     env:
       IMAGE_TAG: ${{ github.sha }}
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Verify Docker and Azure CLI
+      - name: Install Azure CLI if missing
+        shell: bash
         run: |
           set -euo pipefail
-          docker version
+          if ! command -v az >/dev/null 2>&1; then
+            echo "Azure CLI not found. Installing..."
+            curl -fsSL https://aka.ms/InstallAzureCLIDeb \
+              -o "$RUNNER_TEMP/install-azure-cli.sh"
+            sudo bash "$RUNNER_TEMP/install-azure-cli.sh"
+          else
+            echo "Azure CLI is already installed."
+          fi
           az version
+      - name: Verify Docker
+        run: docker version
 
       - name: Azure Login
         uses: azure/login@v3
@@ -286,36 +291,37 @@ jobs:
 
       - name: Build API Docker image
         run: |
-          set -euo pipefail
           docker build \
-            -t "$ACR_LOGIN_SERVER/studentapi:$IMAGE_TAG" \
-            -t "$ACR_LOGIN_SERVER/studentapi:latest" \
+            -t "${ACR_LOGIN_SERVER}/studentapi:${IMAGE_TAG}" \
+            -t "${ACR_LOGIN_SERVER}/studentapi:latest" \
             -f StudentAPI/StudentAPI/StudentAPI/Dockerfile \
             StudentAPI/StudentAPI/StudentAPI
-
       - name: Build Angular Docker image
         run: |
-          set -euo pipefail
           docker build \
-            -t "$ACR_LOGIN_SERVER/studentapp:$IMAGE_TAG" \
-            -t "$ACR_LOGIN_SERVER/studentapp:latest" \
+            -t "${ACR_LOGIN_SERVER}/studentapp:${IMAGE_TAG}" \
+            -t "${ACR_LOGIN_SERVER}/studentapp:latest" \
             -f student-app/Dockerfile \
             student-app
-
-      - name: Push images
+      - name: Push API image
         run: |
-          set -euo pipefail
-          docker push "$ACR_LOGIN_SERVER/studentapi:$IMAGE_TAG"
-          docker push "$ACR_LOGIN_SERVER/studentapi:latest"
-          docker push "$ACR_LOGIN_SERVER/studentapp:$IMAGE_TAG"
-          docker push "$ACR_LOGIN_SERVER/studentapp:latest"
-
-      - name: Verify ACR repositories
-        run: az acr repository list --name "$ACR_NAME" --output table
-
+          docker push "${ACR_LOGIN_SERVER}/studentapi:${IMAGE_TAG}"
+          docker push "${ACR_LOGIN_SERVER}/studentapi:latest"
+      - name: Push Angular image
+        run: |
+          docker push "${ACR_LOGIN_SERVER}/studentapp:${IMAGE_TAG}"
+          docker push "${ACR_LOGIN_SERVER}/studentapp:latest"
+      - name: Verify repositories in ACR
+        run: |
+          az acr repository list \
+            --name "$ACR_NAME" \
+            --output table
       - name: Azure Logout
         if: always()
-        run: az logout || true
+        run: |
+          if command -v az >/dev/null 2>&1; then
+            az logout || true
+          fi
 
   # Stage 8: Deploy applications to existing on-prem Kubernetes.
   # SQL Server stays on Windows at 192.168.1.124:1433.

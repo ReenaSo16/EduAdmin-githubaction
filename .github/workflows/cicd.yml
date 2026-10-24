@@ -380,6 +380,20 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
+      - name: Install kubectl and kubelogin
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          az aks install-cli \
+            --install-location "$RUNNER_TEMP/kubectl" \
+            --kubelogin-install-location "$RUNNER_TEMP/kubelogin"
+
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+
+          "$RUNNER_TEMP/kubectl" version --client
+          "$RUNNER_TEMP/kubelogin" --version      
+
       - name: Get AKS credentials
         shell: bash
         run: |

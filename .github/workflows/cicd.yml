@@ -1,3 +1,10 @@
+# 
+
+
+
+
+
+
 name: EduAdmin CI-CD - On-Prem Kubernetes
 
 on:
@@ -15,8 +22,6 @@ permissions:
 env:
   DOTNET_VERSION: '8.0'
   NODE_VERSION: '22'
-  ACR_NAME: reenaacr1
-  ACR_LOGIN_SERVER: reenaacr1.azurecr.io
 
 jobs:
 
@@ -31,7 +36,6 @@ jobs:
         working-directory: StudentAPI/StudentAPI/StudentAPI
 
     steps:
-    
       - name: Checkout code
         uses: actions/checkout@v4
 
@@ -45,8 +49,9 @@ jobs:
             --install-dir "$RUNNER_TEMP/dotnet"
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
+
       - name: Verify .NET SDK
-        run: '"$RUNNER_TEMP/dotnet/dotnet" --info'
+        run: dotnet --info
 
       - name: Restore dependencies
         run: dotnet restore StudentAPI.csproj
@@ -74,10 +79,6 @@ jobs:
           cache: npm
           cache-dependency-path: student-app/package-lock.json
 
-      - name: Verify Node and npm
-        run: |
-          node --version
-          npm --version
       - name: Install dependencies
         working-directory: student-app
         run: npm ci
@@ -112,12 +113,14 @@ jobs:
             --install-dir "$RUNNER_TEMP/dotnet"
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
+
       - name: Install SonarScanner for .NET
         run: |
           mkdir -p "$RUNNER_TEMP/dotnet-tools"
           dotnet tool install dotnet-sonarscanner \
             --tool-path "$RUNNER_TEMP/dotnet-tools"
           echo "$RUNNER_TEMP/dotnet-tools" >> "$GITHUB_PATH"
+
       - name: Restore dependencies
         run: dotnet restore StudentAPI.csproj
 
@@ -131,6 +134,7 @@ jobs:
             /d:sonar.host.url="$SONAR_HOST_URL" \
             /d:sonar.token="$SONAR_TOKEN" \
             /d:sonar.qualitygate.wait=true
+
       - name: Build for SonarQube
         run: dotnet build StudentAPI.csproj --configuration Release
 
@@ -140,6 +144,8 @@ jobs:
         run: |
           dotnet sonarscanner end \
             /d:sonar.token="$SONAR_TOKEN"
+
+
   # Stage 4: SonarQube analysis for Angular
   sonar-frontend:
     name: SonarQube Frontend Analysis
@@ -166,7 +172,7 @@ jobs:
         run: npm run build
 
       - name: SonarQube scan
-        uses: SonarSource/sonarqube-scan-action@v5
+        uses: SonarSource/sonarqube-scan-action@v6
         env:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_FRONTEND }}
@@ -176,7 +182,9 @@ jobs:
             -Dsonar.projectKey=EduAdmin-Frontend
             -Dsonar.projectName=EduAdmin-Frontend
             -Dsonar.qualitygate.wait=true
-  # Stage 5: Wait for both SonarQube jobs
+
+
+  # Stage 5: Confirm both analyses completed
   sonar-gate:
     name: SonarQube Pipeline Gate
     runs-on: [self-hosted, Linux, X64]
@@ -188,179 +196,3 @@ jobs:
       - name: Confirm analysis succeeded
         run: echo "Both builds and SonarQube analyses succeeded."
 
-
-  # Stage 6: Publish build artifacts to GitHub Actions
-  upload-artifacts:
-    name: Upload Build Artifacts to GitHub
-    runs-on: [self-hosted, Linux, X64]
-    needs: sonar-gate
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install .NET 8
-        run: |
-          mkdir -p "$RUNNER_TEMP/dotnet"
-          curl -fsSL https://dot.net/v1/dotnet-install.sh \
-            -o "$RUNNER_TEMP/dotnet-install.sh"
-          bash "$RUNNER_TEMP/dotnet-install.sh" \
-            --channel 8.0 \
-            --install-dir "$RUNNER_TEMP/dotnet"
-          echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
-          echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
-      - name: Publish .NET API
-        working-directory: StudentAPI/StudentAPI/StudentAPI
-        run: |
-          dotnet restore StudentAPI.csproj
-          dotnet publish StudentAPI.csproj \
-            --configuration Release \
-            --output "${{ github.workspace }}/artifacts/api"
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '22'
-          cache: npm
-          cache-dependency-path: student-app/package-lock.json
-
-      - name: Build Angular frontend
-        working-directory: student-app
-        run: |
-          npm ci
-          npm run build
-      - name: Copy Angular build output
-        run: |
-          mkdir -p artifacts/frontend
-          cp -r student-app/dist/student-app/browser/. artifacts/frontend/
-      - name: Upload API artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: eduadmin-api
-          path: artifacts/api/
-          retention-days: 7
-          if-no-files-found: error
-
-      - name: Upload Angular artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: eduadmin-frontend
-          path: artifacts/frontend/
-          retention-days: 7
-          if-no-files-found: error
-
-
-  # Stage 7: Build and push Docker images to ACR
-  build-and-push-acr:
-    name: Build and Push Docker Images to ACR
-    runs-on: [self-hosted, Linux, X64]
-    needs: upload-artifacts
-
-    # Run this job only for a push to main, not for pull requests.
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
-    env:
-      IMAGE_TAG: ${{ github.sha }}
-
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Install Azure CLI if missing
-        shell: bash
-        run: |
-          set -euo pipefail
-          if ! command -v az >/dev/null 2>&1; then
-            echo "Azure CLI not found. Installing..."
-            curl -fsSL https://aka.ms/InstallAzureCLIDeb \
-              -o "$RUNNER_TEMP/install-azure-cli.sh"
-            sudo bash "$RUNNER_TEMP/install-azure-cli.sh"
-          else
-            echo "Azure CLI is already installed."
-          fi
-          az version
-      - name: Verify Docker
-        run: docker version
-
-      - name: Azure Login
-        uses: azure/login@v3
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Login to ACR
-        run: az acr login --name "$ACR_NAME"
-
-      - name: Build API Docker image
-        run: |
-          docker build \
-            -t "${ACR_LOGIN_SERVER}/studentapi:${IMAGE_TAG}" \
-            -t "${ACR_LOGIN_SERVER}/studentapi:latest" \
-            -f StudentAPI/StudentAPI/StudentAPI/Dockerfile \
-            StudentAPI/StudentAPI/StudentAPI
-      - name: Build Angular Docker image
-        run: |
-          docker build \
-            -t "${ACR_LOGIN_SERVER}/studentapp:${IMAGE_TAG}" \
-            -t "${ACR_LOGIN_SERVER}/studentapp:latest" \
-            -f student-app/Dockerfile \
-            student-app
-      - name: Push API image
-        run: |
-          docker push "${ACR_LOGIN_SERVER}/studentapi:${IMAGE_TAG}"
-          docker push "${ACR_LOGIN_SERVER}/studentapi:latest"
-      - name: Push Angular image
-        run: |
-          docker push "${ACR_LOGIN_SERVER}/studentapp:${IMAGE_TAG}"
-          docker push "${ACR_LOGIN_SERVER}/studentapp:latest"
-      - name: Verify repositories in ACR
-        run: |
-          az acr repository list \
-            --name "$ACR_NAME" \
-            --output table
-      - name: Azure Logout
-        if: always()
-        run: |
-          if command -v az >/dev/null 2>&1; then
-            az logout || true
-          fi
-     
-     
-     
-     
-     
-      # - name: Deploy API
-      #   run: |
-      #     set -euo pipefail
-      #     kubectl apply -f k8s/studentapi-service.yaml --namespace "$NAMESPACE"
-      #     kubectl apply -f k8s/studentapi-deployment.yaml --namespace "$NAMESPACE"
-
-      #     kubectl patch deployment studentapi --namespace "$NAMESPACE" --type=merge \
-      #       -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"acr-pull-secret"}]}}}}'
-
-      #     kubectl set image deployment/studentapi \
-      #       studentapi="$ACR_LOGIN_SERVER/studentapi:$IMAGE_TAG" \
-      #       --namespace "$NAMESPACE"
-
-      #     kubectl rollout status deployment/studentapi \
-      #       --namespace "$NAMESPACE" --timeout=5m
-
-      # - name: Deploy Angular frontend
-      #   run: |
-      #     set -euo pipefail
-      #     kubectl apply -f k8s/studentapp-service.yaml --namespace "$NAMESPACE"
-      #     kubectl apply -f k8s/studentapp-deployment.yaml --namespace "$NAMESPACE"
-
-      #     kubectl patch deployment studentapp --namespace "$NAMESPACE" --type=merge \
-      #       -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"acr-pull-secret"}]}}}}'
-
-      #     kubectl set image deployment/studentapp \
-      #       studentapp="$ACR_LOGIN_SERVER/studentapp:$IMAGE_TAG" \
-      #       --namespace "$NAMESPACE"
-
-      #     kubectl rollout status deployment/studentapp \
-      #       --namespace "$NAMESPACE" --timeout=5m
-
-      # - name: Verify deployment
-      #   run: |
-      #     set -euo pipefail
-      #     kubectl get pods,services -n "$NAMESPACE"
-      #     kubectl get deployments -n "$NAMESPACE"

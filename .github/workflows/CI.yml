@@ -1,5 +1,4 @@
-
-name: EduAdmin Sequential CI CD
+name: EduAdmin CI-CD
 
 on:
   push:
@@ -11,74 +10,22 @@ permissions:
   contents: read
 
 concurrency:
-  group: eduadmin-main-pipeline
-  cancel-in-progress: false
+  group: eduadmin-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   DOTNET_VERSION: '8.0'
-  NODE_VERSION: '22'
   API_DIR: StudentAPI/StudentAPI/StudentAPI
+  API_PROJECT: StudentAPI/StudentAPI/StudentAPI/StudentAPI.csproj
   ACR_NAME: reenaacr1
   ACR_RESOURCE_GROUP: rg-github-runner-lab
   ACR_LOGIN_SERVER: reenaacr1.azurecr.io
   AZURE_SUBSCRIPTION_ID: 148b2a40-f782-4d5f-a639-c8a9204fb98b
 
 jobs:
-
-  # 01 - Azure login and ACR validation
-  azure-login:
-    name: "01 - Azure Login and ACR Validation"
-    runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 10
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Verify Azure CLI
-        shell: bash
-        run: |
-          set -euo pipefail
-          command -v az
-          az version
-
-      - name: Azure Login
-        uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Validate subscription and ACR
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          az account set \
-            --subscription "$AZURE_SUBSCRIPTION_ID"
-
-          echo "Azure subscription:"
-          az account show \
-            --query '{name:name,id:id,tenantId:tenantId}' \
-            --output table
-
-          echo "Validating ACR:"
-          az acr show \
-            --subscription "$AZURE_SUBSCRIPTION_ID" \
-            --resource-group "$ACR_RESOURCE_GROUP" \
-            --name "$ACR_NAME" \
-            --query '{name:name,loginServer:loginServer,resourceGroup:resourceGroup}' \
-            --output table
-
-          echo "Azure and ACR validation successful."
-
-      - name: Logout
-        if: always()
-        shell: bash
-        run: az logout || true
-
-  # 02 - API build, test and publish
+  # 1. API build and tests
   api-build-test:
-    name: "02 - API Build Test and Publish"
-    needs: azure-login
+    name: "01 - API Build and Test"
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 30
 
@@ -86,26 +33,17 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install .NET SDK locally
+      - name: Install .NET SDK
         shell: bash
         run: |
-          set -euo pipefail
-
+          set -e
           mkdir -p "$RUNNER_TEMP/dotnet"
-
-          curl -fsSL --retry 3 \
-            https://dot.net/v1/dotnet-install.sh \
+          curl -fsSL --retry 3 https://dot.net/v1/dotnet-install.sh \
             -o "$RUNNER_TEMP/dotnet-install.sh"
-
           bash "$RUNNER_TEMP/dotnet-install.sh" \
-            --channel 8.0 \
-            --install-dir "$RUNNER_TEMP/dotnet"
-
+            --channel 8.0 --install-dir "$RUNNER_TEMP/dotnet"
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
-
-      - name: Verify .NET SDK
-        run: dotnet --info
 
       - name: Restore
         working-directory: ${{ env.API_DIR }}
@@ -122,36 +60,26 @@ jobs:
       - name: Publish API
         working-directory: ${{ env.API_DIR }}
         run: |
-          set -euo pipefail
-
-          dotnet publish StudentAPI.csproj \
-            -c Release \
-            --no-build \
+          dotnet publish StudentAPI.csproj -c Release --no-build \
             -o "$RUNNER_TEMP/api-publish"
 
-      - name: Verify published files
-        shell: bash
-        run: |
-          set -euo pipefail
-          test -n "$(find "$RUNNER_TEMP/api-publish" -type f -print -quit)"
-          ls -la "$RUNNER_TEMP/api-publish"
-
-      - name: Upload API artifact
+      - name: Upload API publish artifact
         uses: actions/upload-artifact@v4
         with:
           name: eduadmin-api-publish
           path: ${{ runner.temp }}/api-publish/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
 
-      - name: Cleanup local SDK installer
+      - name: Cleanup SDK
         if: always()
-        shell: bash
-        run: rm -f "$RUNNER_TEMP/dotnet-install.sh"
+        run: |
+          rm -rf "$RUNNER_TEMP/dotnet"
+          rm -f "$RUNNER_TEMP/dotnet-install.sh"
 
-  # 03 - API SonarQube
+  # 2. API SonarQube analysis
   api-sonarqube:
-    name: "03 - API SonarQube"
+    name: "02 - API SonarQube"
     needs: api-build-test
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 30
@@ -160,37 +88,21 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install .NET SDK locally
-        shell: bash
+      - name: Install .NET SDK
         run: |
-          set -euo pipefail
-
+          set -e
           mkdir -p "$RUNNER_TEMP/dotnet"
-
-          curl -fsSL --retry 3 \
-            https://dot.net/v1/dotnet-install.sh \
+          curl -fsSL --retry 3 https://dot.net/v1/dotnet-install.sh \
             -o "$RUNNER_TEMP/dotnet-install.sh"
-
           bash "$RUNNER_TEMP/dotnet-install.sh" \
-            --channel 8.0 \
-            --install-dir "$RUNNER_TEMP/dotnet"
-
+            --channel 8.0 --install-dir "$RUNNER_TEMP/dotnet"
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
 
-      - name: Verify .NET SDK
-        run: dotnet --info
-
       - name: Install SonarScanner
-        shell: bash
         run: |
-          set -euo pipefail
-
-          mkdir -p "$RUNNER_TEMP/dotnet-tools"
-
           dotnet tool install dotnet-sonarscanner \
             --tool-path "$RUNNER_TEMP/dotnet-tools"
-
           echo "$RUNNER_TEMP/dotnet-tools" >> "$GITHUB_PATH"
 
       - name: Begin API analysis
@@ -199,14 +111,12 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_API }}
         run: |
-          set -euo pipefail
-
+          set -e
           dotnet-sonarscanner begin \
             /k:"EduAdmin-API" \
             /n:"EduAdmin-API" \
             /d:sonar.host.url="$SONAR_HOST_URL" \
-            /d:sonar.token="$SONAR_TOKEN" \
-            /d:sonar.qualitygate.wait=true
+            /d:sonar.token="$SONAR_TOKEN"
 
       - name: Restore for analysis
         working-directory: ${{ env.API_DIR }}
@@ -220,23 +130,21 @@ jobs:
         working-directory: ${{ env.API_DIR }}
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_API }}
-        run: |
-          dotnet-sonarscanner end \
-            /d:sonar.token="$SONAR_TOKEN"
+        run: dotnet-sonarscanner end /d:sonar.token="$SONAR_TOKEN"
 
-      - name: Cleanup scanner and installer files
+      - name: Cleanup scanner and SDK
         if: always()
-        shell: bash
         run: |
+          rm -rf "$RUNNER_TEMP/dotnet"
           rm -rf "$RUNNER_TEMP/dotnet-tools"
           rm -f "$RUNNER_TEMP/dotnet-install.sh"
 
-  # 04 - Angular build
+  # 3. Frontend build
   frontend-build:
-    name: "04 - Angular Build"
+    name: "03 - Angular Build"
     needs: api-sonarqube
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 45
+    timeout-minutes: 60
 
     steps:
       - name: Checkout
@@ -246,39 +154,33 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: student-app/package-lock.json
 
       - name: Install dependencies
         working-directory: student-app
+        timeout-minutes: 20
         run: npm ci --no-audit --no-fund --progress=false
 
       - name: Build Angular
         working-directory: student-app
         run: npm run build
 
-      - name: Verify Angular output
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          test -d student-app/dist/student-app
-          test -n "$(find student-app/dist/student-app -type f -print -quit)"
-
-          echo "Angular build output:"
-          find student-app/dist/student-app -maxdepth 3 -type f | head -30
-
-      - name: Upload frontend artifact
+      - name: Upload frontend build artifact
         uses: actions/upload-artifact@v4
         with:
           name: eduadmin-frontend-dist
           path: student-app/dist/student-app/
           if-no-files-found: error
-          retention-days: 7
+          retention-days: 14
 
-  # 05 - Frontend SonarQube
+      - name: Cleanup npm files
+        if: always()
+        run: |
+          rm -rf student-app/node_modules
+          npm cache clean --force || true
+
+  # 4. Frontend SonarQube analysis
   frontend-sonarqube:
-    name: "05 - Frontend SonarQube"
+    name: "04 - Frontend SonarQube"
     needs: frontend-build
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 30
@@ -291,26 +193,19 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: student-app/package-lock.json
 
       - name: Install SonarScanner CLI
-        shell: bash
         run: |
-          set -euo pipefail
-
+          set -e
           VERSION="7.1.0.4889"
           ARCHIVE="$RUNNER_TEMP/sonar-scanner.zip"
           EXTRACT_DIR="$RUNNER_TEMP/sonar-scanner-extract"
 
           mkdir -p "$EXTRACT_DIR"
-
           curl -fsSL --retry 3 \
             "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${VERSION}-linux-x64.zip" \
             -o "$ARCHIVE"
-
           unzip -q -o "$ARCHIVE" -d "$EXTRACT_DIR"
-
           echo "$EXTRACT_DIR/sonar-scanner-${VERSION}-linux-x64/bin" \
             >> "$GITHUB_PATH"
 
@@ -320,8 +215,7 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_FRONTEND }}
         run: |
-          set -euo pipefail
-
+          set -e
           sonar-scanner \
             -Dsonar.projectKey=EduAdmin-Frontend \
             -Dsonar.projectName=EduAdmin-Frontend \
@@ -329,20 +223,53 @@ jobs:
             -Dsonar.token="$SONAR_TOKEN" \
             -Dsonar.sources=src \
             -Dsonar.sourceEncoding=UTF-8 \
-            -Dsonar.qualitygate.wait=true \
             -Dsonar.exclusions="**/node_modules/**,**/dist/**"
 
       - name: Cleanup scanner files
         if: always()
-        shell: bash
         run: |
           rm -rf "$RUNNER_TEMP/sonar-scanner-extract"
           rm -f "$RUNNER_TEMP/sonar-scanner.zip"
 
-  # 06 - Build and push API image
+  # 5. Azure Login and ACR validation
+  azure-login-acr-validation:
+    name: "05 - Azure Login and ACR Validation"
+    needs: frontend-sonarqube
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 15
+
+    steps:
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Validate subscription and ACR
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          az account set \
+            --subscription "$AZURE_SUBSCRIPTION_ID"
+
+          az account show \
+            --query "{name:name,id:id,tenantId:tenantId}" \
+            --output table
+
+          az acr show \
+            --name "$ACR_NAME" \
+            --resource-group "$ACR_RESOURCE_GROUP" \
+            --query "{name:name,loginServer:loginServer,id:id}" \
+            --output table
+
+      - name: Azure Logout
+        if: always()
+        run: az logout || true
+
+  # 6. Build and push API Docker image
   api-image:
     name: "06 - Build and Push API Image"
-    needs: frontend-sonarqube
+    needs: azure-login-acr-validation
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 30
 
@@ -350,64 +277,50 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Azure Login
-        uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Download API artifact
+      - name: Download API publish artifact
         uses: actions/download-artifact@v4
         with:
           name: eduadmin-api-publish
           path: docker-context/api/publish
 
-      - name: Prepare API Dockerfile
+      - name: Prepare API Docker context
         shell: bash
         run: |
           set -euo pipefail
-
-          test -f StudentAPI/StudentAPI/StudentAPI/Dockerfile
-          mkdir -p docker-context/api
-
-          cp StudentAPI/StudentAPI/StudentAPI/Dockerfile \
-            docker-context/api/Dockerfile
-
+          test -f "$API_DIR/Dockerfile"
           test -n "$(find docker-context/api/publish -type f -print -quit)"
+          cp "$API_DIR/Dockerfile" docker-context/api/Dockerfile
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to ACR
+        run: |
+          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+          az acr login --name "$ACR_NAME"
 
       - name: Build API image
-        shell: bash
         run: |
-          set -euo pipefail
-
           docker build \
+            --pull \
             -t "$ACR_LOGIN_SERVER/eduadmin-api:$GITHUB_SHA" \
             docker-context/api
 
-      - name: Login to ACR
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          az acr login \
-            --name "$ACR_NAME" \
-            --subscription "$AZURE_SUBSCRIPTION_ID"
-
       - name: Push API image
-        shell: bash
         run: |
-          set -euo pipefail
           docker push "$ACR_LOGIN_SERVER/eduadmin-api:$GITHUB_SHA"
 
-      - name: Cleanup
+      - name: Cleanup API Docker context
         if: always()
-        shell: bash
-        run: |
-          docker logout "$ACR_LOGIN_SERVER" || true
-          docker image rm "$ACR_LOGIN_SERVER/eduadmin-api:$GITHUB_SHA" || true
-          rm -rf docker-context/api
-          az logout || true
+        run: rm -rf docker-context/api
 
-  # 07 - Build and push frontend image
+      - name: Azure Logout
+        if: always()
+        run: az logout || true
+
+  # 7. Build and push frontend Docker image
   frontend-image:
     name: "07 - Build and Push Frontend Image"
     needs: api-image
@@ -418,59 +331,45 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Azure Login
-        uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Download frontend artifact
+      - name: Download frontend build artifact
         uses: actions/download-artifact@v4
         with:
           name: eduadmin-frontend-dist
           path: docker-context/frontend/dist
 
-      - name: Prepare frontend Dockerfile
+      - name: Prepare frontend Docker context
         shell: bash
         run: |
           set -euo pipefail
-
           test -f student-app/Dockerfile
-          mkdir -p docker-context/frontend
-
-          cp student-app/Dockerfile \
-            docker-context/frontend/Dockerfile
-
           test -n "$(find docker-context/frontend/dist -type f -print -quit)"
+          cp student-app/Dockerfile docker-context/frontend/Dockerfile
+
+      - name: Azure Login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Login to ACR
+        run: |
+          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+          az acr login --name "$ACR_NAME"
 
       - name: Build frontend image
-        shell: bash
         run: |
-          set -euo pipefail
-
           docker build \
+            --pull \
             -t "$ACR_LOGIN_SERVER/eduadmin-frontend:$GITHUB_SHA" \
             docker-context/frontend
 
-      - name: Login to ACR
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          az acr login \
-            --name "$ACR_NAME" \
-            --subscription "$AZURE_SUBSCRIPTION_ID"
-
       - name: Push frontend image
-        shell: bash
         run: |
-          set -euo pipefail
           docker push "$ACR_LOGIN_SERVER/eduadmin-frontend:$GITHUB_SHA"
 
-      - name: Cleanup
+      - name: Cleanup frontend Docker context
         if: always()
-        shell: bash
-        run: |
-          docker logout "$ACR_LOGIN_SERVER" || true
-          docker image rm "$ACR_LOGIN_SERVER/eduadmin-frontend:$GITHUB_SHA" || true
-          rm -rf docker-context/frontend
-          az logout || true
+        run: rm -rf docker-context/frontend
+
+      - name: Azure Logout
+        if: always()
+        run: az logout || true

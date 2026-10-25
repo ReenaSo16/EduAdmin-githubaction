@@ -1,4 +1,5 @@
-name: EduAdmin Build and SonarQube
+
+name: EduAdmin CI with SonarQube and Artifacts
 
 on:
   push:
@@ -31,78 +32,43 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Install .NET 8 SDK
-        shell: bash
         run: |
           set -e
           mkdir -p "$RUNNER_TEMP/dotnet"
-
           curl -fsSL https://dot.net/v1/dotnet-install.sh \
             -o "$RUNNER_TEMP/dotnet-install.sh"
-
           bash "$RUNNER_TEMP/dotnet-install.sh" \
             --channel 8.0 \
             --install-dir "$RUNNER_TEMP/dotnet"
-
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
 
       - name: Verify .NET SDK
-        run: |
-          dotnet --info
+        run: dotnet --info
 
-      - name: Diagnose Runner and SonarQube Connectivity
+      - name: Check SonarQube connectivity
         env:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         run: |
           set -e
-
-          echo "=== Runner diagnostics ==="
-          echo "Hostname: $(hostname)"
-          echo "User: $(whoami)"
-          echo "Runner name: ${RUNNER_NAME:-unknown}"
-
-          if [ -z "$SONAR_HOST_URL" ]; then
-            echo "ERROR: SONAR_HOST_URL secret is missing."
-            exit 1
-          fi
-
-          echo "=== Check TCP connectivity ==="
           nc -vz -w 10 104.211.220.200 9000
-
-          echo "=== Check SonarQube status ==="
           curl --fail --silent --show-error \
-            --connect-timeout 10 \
-            --max-time 30 \
+            --connect-timeout 10 --max-time 30 \
             "${SONAR_HOST_URL%/}/api/system/status"
-
-          echo
-          echo "SonarQube connectivity check passed."
 
       - name: Install SonarScanner for .NET
         run: |
-          set -e
           dotnet tool install dotnet-sonarscanner \
             --tool-path "$RUNNER_TEMP/dotnet-tools"
-
           echo "$RUNNER_TEMP/dotnet-tools" >> "$GITHUB_PATH"
 
-      - name: Verify SonarScanner installation
-        run: |
-          test -x "$RUNNER_TEMP/dotnet-tools/dotnet-sonarscanner"
-          echo "SonarScanner is installed successfully."
-
-      - name: Begin SonarQube Analysis
+      - name: Begin API SonarQube Analysis
         env:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_API }}
         run: |
           set -e
-
-          if [ -z "$SONAR_TOKEN" ]; then
-            echo "ERROR: SONAR_TOKEN_API secret is missing."
-            exit 1
-          fi
-
+          test -n "$SONAR_TOKEN"
           dotnet-sonarscanner begin \
             /k:"EduAdmin-API" \
             /n:"EduAdmin-API" \
@@ -110,8 +76,7 @@ jobs:
             /d:sonar.token="$SONAR_TOKEN"
 
       - name: Restore API dependencies
-        run: |
-          dotnet restore StudentAPI.csproj
+        run: dotnet restore StudentAPI.csproj
 
       - name: Build API
         run: |
@@ -125,17 +90,35 @@ jobs:
             --configuration Release \
             --no-build
 
-      - name: Complete SonarQube Analysis
-        if: success()
+      - name: Complete API SonarQube Analysis
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_API }}
         run: |
           dotnet-sonarscanner end \
             /d:sonar.token="$SONAR_TOKEN"
 
+      - name: Publish API
+        run: |
+          dotnet publish StudentAPI.csproj \
+            --configuration Release \
+            --no-build \
+            --output "$RUNNER_TEMP/api-publish"
+
+      - name: Upload API Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eduadmin-api
+          path: ${{ runner.temp }}/api-publish/
+          if-no-files-found: error
+          retention-days: 14
+
   build-frontend:
-    name: Build Angular Frontend
+    name: Build and Analyze Angular Frontend
     runs-on: [self-hosted, Linux, X64]
+
+    defaults:
+      run:
+        shell: bash
 
     steps:
       - name: Checkout code
@@ -155,3 +138,47 @@ jobs:
       - name: Build Angular frontend
         working-directory: student-app
         run: npm run build
+
+      - name: Prepare SonarScanner CLI
+        run: |
+          set -e
+          SONAR_SCANNER_VERSION="7.1.0.4889"
+          SCANNER_DIR="$RUNNER_TEMP/sonar-scanner"
+          ARCHIVE="$RUNNER_TEMP/sonar-scanner.zip"
+
+          curl -fsSL \
+            "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_SCANNER_VERSION}-linux-x64.zip" \
+            -o "$ARCHIVE"
+
+          unzip -q -o "$ARCHIVE" -d "$RUNNER_TEMP"
+
+          mv "$RUNNER_TEMP/sonar-scanner-${SONAR_SCANNER_VERSION}-linux-x64" \
+            "$SCANNER_DIR"
+
+          echo "$SCANNER_DIR/bin" >> "$GITHUB_PATH"
+
+      - name: Begin Frontend SonarQube Analysis
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_FRONTEND }}
+        working-directory: student-app
+        run: |
+          set -e
+          test -n "$SONAR_TOKEN"
+
+          sonar-scanner \
+            -Dsonar.projectKey=EduAdmin-Frontend \
+            -Dsonar.projectName=EduAdmin-Frontend \
+            -Dsonar.host.url="$SONAR_HOST_URL" \
+            -Dsonar.token="$SONAR_TOKEN" \
+            -Dsonar.sources=src \
+            -Dsonar.sourceEncoding=UTF-8 \
+            -Dsonar.exclusions="**/node_modules/**,**/dist/**"
+
+      - name: Upload Angular Build Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eduadmin-frontend
+          path: student-app/dist/
+          if-no-files-found: error
+          retention-days: 14

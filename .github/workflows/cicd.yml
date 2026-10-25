@@ -1,5 +1,4 @@
-
-name: EduAdmin CI with SonarQube and Artifacts
+name: EduAdmin CI SonarQube and Artifacts
 
 on:
   push:
@@ -13,6 +12,10 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: eduadmin-ci-${{ github.ref }}
+  cancel-in-progress: false
+
 env:
   DOTNET_VERSION: '8.0'
   NODE_VERSION: '22'
@@ -21,6 +24,7 @@ jobs:
   build-api:
     name: Build, Test and Analyze .NET API
     runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
 
     defaults:
       run:
@@ -35,11 +39,15 @@ jobs:
         run: |
           set -e
           mkdir -p "$RUNNER_TEMP/dotnet"
-          curl -fsSL https://dot.net/v1/dotnet-install.sh \
+
+          curl -fsSL --retry 3 \
+            https://dot.net/v1/dotnet-install.sh \
             -o "$RUNNER_TEMP/dotnet-install.sh"
+
           bash "$RUNNER_TEMP/dotnet-install.sh" \
             --channel 8.0 \
             --install-dir "$RUNNER_TEMP/dotnet"
+
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
 
@@ -51,15 +59,25 @@ jobs:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         run: |
           set -e
+          test -n "$SONAR_HOST_URL"
+
           nc -vz -w 10 104.211.220.200 9000
+
           curl --fail --silent --show-error \
-            --connect-timeout 10 --max-time 30 \
+            --connect-timeout 10 \
+            --max-time 30 \
             "${SONAR_HOST_URL%/}/api/system/status"
+
+          echo
 
       - name: Install SonarScanner for .NET
         run: |
+          set -e
+          mkdir -p "$RUNNER_TEMP/dotnet-tools"
+
           dotnet tool install dotnet-sonarscanner \
             --tool-path "$RUNNER_TEMP/dotnet-tools"
+
           echo "$RUNNER_TEMP/dotnet-tools" >> "$GITHUB_PATH"
 
       - name: Begin API SonarQube Analysis
@@ -69,6 +87,7 @@ jobs:
         run: |
           set -e
           test -n "$SONAR_TOKEN"
+
           dotnet-sonarscanner begin \
             /k:"EduAdmin-API" \
             /n:"EduAdmin-API" \
@@ -112,13 +131,20 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
+      - name: Clean temporary API build files
+        if: always()
+        working-directory: .
+        run: |
+          rm -rf "$RUNNER_TEMP/dotnet"
+          rm -rf "$RUNNER_TEMP/dotnet-tools"
+          rm -rf "$RUNNER_TEMP/api-publish"
+          rm -f "$RUNNER_TEMP/dotnet-install.sh"
+
   build-frontend:
     name: Build and Analyze Angular Frontend
+    needs: build-api
     runs-on: [self-hosted, Linux, X64]
-
-    defaults:
-      run:
-        shell: bash
+    timeout-minutes: 30
 
     steps:
       - name: Checkout code
@@ -128,42 +154,50 @@ jobs:
         uses: actions/setup-node@v4
         with:
           node-version: '22'
-          cache: npm
-          cache-dependency-path: student-app/package-lock.json
 
       - name: Install frontend dependencies
         working-directory: student-app
-        run: npm ci
+        run: npm ci --no-audit --no-fund
 
       - name: Build Angular frontend
         working-directory: student-app
         run: npm run build
 
+      - name: Clean npm cache and dependencies
+        run: |
+          npm cache clean --force
+          rm -rf student-app/node_modules
+
       - name: Prepare SonarScanner CLI
         run: |
           set -e
-          SONAR_SCANNER_VERSION="7.1.0.4889"
-          SCANNER_DIR="$RUNNER_TEMP/sonar-scanner"
-          ARCHIVE="$RUNNER_TEMP/sonar-scanner.zip"
 
-          curl -fsSL \
-            "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${SONAR_SCANNER_VERSION}-linux-x64.zip" \
+          VERSION="7.1.0.4889"
+          ARCHIVE="$RUNNER_TEMP/sonar-scanner.zip"
+          EXTRACT_DIR="$RUNNER_TEMP/sonar-scanner-extract"
+          SCANNER_DIR="$RUNNER_TEMP/sonar-scanner"
+
+          mkdir -p "$EXTRACT_DIR"
+
+          curl -fsSL --retry 3 \
+            "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${VERSION}-linux-x64.zip" \
             -o "$ARCHIVE"
 
-          unzip -q -o "$ARCHIVE" -d "$RUNNER_TEMP"
+          unzip -q "$ARCHIVE" -d "$EXTRACT_DIR"
 
-          mv "$RUNNER_TEMP/sonar-scanner-${SONAR_SCANNER_VERSION}-linux-x64" \
+          mv "$EXTRACT_DIR/sonar-scanner-${VERSION}-linux-x64" \
             "$SCANNER_DIR"
 
           echo "$SCANNER_DIR/bin" >> "$GITHUB_PATH"
 
-      - name: Begin Frontend SonarQube Analysis
+      - name: Analyze Angular Frontend in SonarQube
+        working-directory: student-app
         env:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_FRONTEND }}
-        working-directory: student-app
         run: |
           set -e
+          test -n "$SONAR_HOST_URL"
           test -n "$SONAR_TOKEN"
 
           sonar-scanner \
@@ -179,6 +213,13 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: eduadmin-frontend
-          path: student-app/dist/
+          path: student-app/dist/student-app/
           if-no-files-found: error
           retention-days: 14
+
+      - name: Clean temporary frontend scanner files
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/sonar-scanner"
+          rm -rf "$RUNNER_TEMP/sonar-scanner-extract"
+          rm -f "$RUNNER_TEMP/sonar-scanner.zip"

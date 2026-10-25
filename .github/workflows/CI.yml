@@ -337,6 +337,7 @@ jobs:
           name: eduadmin-frontend-dist
           path: docker-context/frontend/dist
 
+    
       - name: Prepare frontend Docker context
         shell: bash
         run: |
@@ -344,6 +345,13 @@ jobs:
           test -f student-app/Dockerfile
           test -n "$(find docker-context/frontend/dist -type f -print -quit)"
           cp student-app/Dockerfile docker-context/frontend/Dockerfile
+
+        - name: Copy Nginx configuration
+        shell: bash
+        run: |
+          set -euo pipefail
+          cp student-app/nginx.conf docker-context/frontend/nginx.conf    
+    
 
       - name: Azure Login
         uses: azure/login@v2

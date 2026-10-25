@@ -1,0 +1,302 @@
+
+name: EduAdmin CD - On-Prem Kubernetes
+
+on:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Full 40-character SHA from a successful CI run"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: eduadmin-onprem-cd
+  cancel-in-progress: false
+
+env:
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+  K8S_NAMESPACE: student
+  SQL_SERVER: "192.168.1.124,1433"
+  SQL_DATABASE: StudentDB
+
+jobs:
+  deploy-database:
+    name: Deploy StudentDB DACPAC
+    runs-on: [self-hosted, linux, x64]
+
+    steps:
+      - name: Checkout selected commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.image_tag }}
+
+      - name: Validate input and DACPAC
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: Enter the full 40-character lowercase commit SHA."
+            exit 1
+          fi
+
+          test -s Database/StudentDB.dacpac
+          echo "DACPAC file exists."
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Install SqlPackage
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          dotnet tool install \
+            --tool-path "$RUNNER_TEMP/sqlpackage" \
+            Microsoft.SqlPackage
+
+          "$RUNNER_TEMP/sqlpackage/sqlpackage" /Version
+
+      - name: Validate SQL deployment credentials
+        shell: bash
+        env:
+          SQLSERVER_USERNAME: ${{ secrets.SQLSERVER_USERNAME }}
+          SQLSERVER_PASSWORD: ${{ secrets.SQLSERVER_SA_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "$SQLSERVER_USERNAME"
+          test -n "$SQLSERVER_PASSWORD"
+          echo "SQL deployment credentials are configured."
+
+      - name: Check SQL Server network connectivity
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          timeout 5 bash -c \
+            '</dev/tcp/192.168.1.124/1433'
+
+          echo "SQL Server TCP port is reachable."
+
+      - name: Generate DACPAC deployment report
+        shell: bash
+        env:
+          SQLSERVER_USERNAME: ${{ secrets.SQLSERVER_USERNAME }}
+          SQLSERVER_PASSWORD: ${{ secrets.SQLSERVER_SA_PASSWORD }}
+        run: |
+          set -euo pipefail
+          set +x
+
+          "$RUNNER_TEMP/sqlpackage/sqlpackage" \
+            /Action:DeployReport \
+            /SourceFile:"Database/StudentDB.dacpac" \
+            /TargetServerName:"$SQL_SERVER" \
+            /TargetDatabaseName:"$SQL_DATABASE" \
+            /TargetUser:"$SQLSERVER_USERNAME" \
+            /TargetPassword:"$SQLSERVER_PASSWORD" \
+            /TargetEncryptConnection:True \
+            /TargetTrustServerCertificate:True \
+            /OutputPath:"$RUNNER_TEMP/StudentDB-deploy-report.xml"
+
+          echo "Deployment report generated in runner temporary storage."
+          echo "Review the report and back up the database before publishing."
+
+      - name: Publish DACPAC to StudentDB
+        shell: bash
+        env:
+          SQLSERVER_USERNAME: ${{ secrets.SQLSERVER_USERNAME }}
+          SQLSERVER_PASSWORD: ${{ secrets.SQLSERVER_SA_PASSWORD }}
+        run: |
+          set -euo pipefail
+          set +x
+
+          "$RUNNER_TEMP/sqlpackage/sqlpackage" \
+            /Action:Publish \
+            /SourceFile:"Database/StudentDB.dacpac" \
+            /TargetServerName:"$SQL_SERVER" \
+            /TargetDatabaseName:"$SQL_DATABASE" \
+            /TargetUser:"$SQLSERVER_USERNAME" \
+            /TargetPassword:"$SQLSERVER_PASSWORD" \
+            /TargetEncryptConnection:True \
+            /TargetTrustServerCertificate:True \
+            /p:BlockOnPossibleDataLoss=True
+
+          echo "StudentDB DACPAC publish completed."
+
+  deploy-kubernetes:
+    name: Deploy API and Frontend
+    needs: deploy-database
+    runs-on: [self-hosted, linux, x64]
+
+    steps:
+      - name: Checkout selected commit
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.image_tag }}
+
+      - name: Validate tools and configuration
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "ERROR: Invalid commit SHA."
+            exit 1
+          fi
+
+          test -n "$ACR_LOGIN_SERVER"
+          command -v kubectl
+          command -v jq
+          kubectl version --client
+          kubectl cluster-info
+
+      - name: Ensure namespace exists
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl create namespace "$K8S_NAMESPACE" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Create or update ConfigMap
+        shell: bash
+        run: |
+          set -euo pipefail
+          kubectl apply -f k8s/configmap.yaml
+
+      - name: Create or update database Secret
+        shell: bash
+        env:
+          STUDENT_DB_CONNECTION: ${{ secrets.STUDENT_DB_CONNECTION }}
+        run: |
+          set -euo pipefail
+          set +x
+
+          test -n "$STUDENT_DB_CONNECTION" || {
+            echo "ERROR: STUDENT_DB_CONNECTION is missing."
+            exit 1
+          }
+
+          kubectl create secret generic student-db-secret \
+            --namespace "$K8S_NAMESPACE" \
+            --from-literal="ConnectionStrings__DefaultConnection=$STUDENT_DB_CONNECTION" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+      - name: Create or update ACR pull Secret
+        shell: bash
+        env:
+          AZURE_CREDENTIALS: ${{ secrets.AZURE_CREDENTIALS }}
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          set -euo pipefail
+          set +x
+
+          CLIENT_ID=$(printf '%s' "$AZURE_CREDENTIALS" | jq -er '.clientId')
+          CLIENT_SECRET=$(printf '%s' "$AZURE_CREDENTIALS" | jq -er '.clientSecret')
+
+          test -n "$CLIENT_ID"
+          test -n "$CLIENT_SECRET"
+          test -n "$ACR_LOGIN_SERVER"
+
+          kubectl create secret docker-registry acr-pull-secret \
+            --namespace "$K8S_NAMESPACE" \
+            --docker-server="$ACR_LOGIN_SERVER" \
+            --docker-username="$CLIENT_ID" \
+            --docker-password="$CLIENT_SECRET" \
+            --dry-run=client -o yaml | kubectl apply -f -
+
+          unset CLIENT_SECRET AZURE_CREDENTIALS
+
+      - name: Apply Kubernetes Services and Deployments
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl apply -f k8s/studentapi-service.yaml
+          kubectl apply -f k8s/studentapi-deployment.yaml
+          kubectl apply -f k8s/studentapp-service.yaml
+          kubectl apply -f k8s/studentapp-deployment.yaml
+
+      - name: Set exact SHA-tagged images
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          set -euo pipefail
+
+          kubectl set image deployment/studentapi \
+            studentapi="$ACR_LOGIN_SERVER/eduadmin-api:$IMAGE_TAG" \
+            --namespace "$K8S_NAMESPACE"
+
+          kubectl set image deployment/studentapp \
+            studentapp="$ACR_LOGIN_SERVER/eduadmin-frontend:$IMAGE_TAG" \
+            --namespace "$K8S_NAMESPACE"
+
+      - name: Configure imagePullSecrets
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl patch deployment studentapi \
+            --namespace "$K8S_NAMESPACE" \
+            --type=merge \
+            -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"acr-pull-secret"}]}}}}'
+
+          kubectl patch deployment studentapp \
+            --namespace "$K8S_NAMESPACE" \
+            --type=merge \
+            -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"acr-pull-secret"}]}}}}'
+
+      - name: Wait for rollouts
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          kubectl rollout status deployment/studentapi \
+            --namespace "$K8S_NAMESPACE" \
+            --timeout=300s
+
+          kubectl rollout status deployment/studentapp \
+            --namespace "$K8S_NAMESPACE" \
+            --timeout=300s
+
+      - name: Verify deployed resources
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          set -euo pipefail
+
+          API_IMAGE=$(kubectl get deployment studentapi \
+            -n "$K8S_NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="studentapi")].image}')
+
+          FRONTEND_IMAGE=$(kubectl get deployment studentapp \
+            -n "$K8S_NAMESPACE" \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="studentapp")].image}')
+
+          test "$API_IMAGE" = "$ACR_LOGIN_SERVER/eduadmin-api:$IMAGE_TAG"
+          test "$FRONTEND_IMAGE" = "$ACR_LOGIN_SERVER/eduadmin-frontend:$IMAGE_TAG"
+
+          kubectl get configmap eduadmin-config -n "$K8S_NAMESPACE"
+          kubectl get secret student-db-secret acr-pull-secret -n "$K8S_NAMESPACE"
+          kubectl get deployments -n "$K8S_NAMESPACE" -o wide
+          kubectl get pods -n "$K8S_NAMESPACE" -o wide
+          kubectl get services -n "$K8S_NAMESPACE"
+          kubectl get events -n "$K8S_NAMESPACE" \
+            --sort-by=.lastTimestamp | tail -n 20
+
+          echo "Verified API image: $API_IMAGE"
+          echo "Verified frontend image: $FRONTEND_IMAGE"

@@ -16,7 +16,7 @@ spec:
     spec:
       containers:
         - name: studentapi
-          image: reenaacr1.azurecr.io/studentapi:latest
+          image: reenaacr1.azurecr.io/eduadmin-api:latest
           imagePullPolicy: Always
           ports:
             - name: http

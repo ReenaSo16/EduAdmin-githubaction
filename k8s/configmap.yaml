@@ -16,13 +16,13 @@
 #   DB_NAME: "StudentDB"
 
 
+
 apiVersion: v1
 kind: ConfigMap
 metadata:
-  name: student-config
+  name: eduadmin-config
   namespace: student
 data:
   DB_NAME: "StudentDB"
   DB_PORT: "1433"
   ASPNETCORE_ENVIRONMENT: "Production"
-

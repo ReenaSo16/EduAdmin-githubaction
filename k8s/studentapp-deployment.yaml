@@ -45,7 +45,7 @@ spec:
     spec:
       containers:
         - name: studentapp
-          image: reenaacr1.azurecr.io/studentapp:latest
+          image: reenaacr1.azurecr.io/eduadmin-frontend:latest
           imagePullPolicy: Always
           ports:
             - containerPort: 80

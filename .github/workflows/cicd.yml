@@ -4,11 +4,9 @@ on:
   push:
     branches:
       - main
-
   pull_request:
     branches:
       - main
-
   workflow_dispatch:
 
 permissions:
@@ -19,11 +17,9 @@ env:
   NODE_VERSION: '22'
 
 jobs:
-
-  # Stage 1: Build, Test and Analyze .NET API
   build-api:
     name: Build, Test and Analyze .NET API
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, onprem-kubeadm-runner]
 
     defaults:
       run:
@@ -31,70 +27,68 @@ jobs:
         working-directory: StudentAPI/StudentAPI/StudentAPI
 
     steps:
-      # 1. Checkout source code
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2. Install .NET 8 SDK
-      - name: Install .NET 8
+      - name: Install .NET 8 SDK
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/dotnet"
-
           curl -fsSL https://dot.net/v1/dotnet-install.sh \
             -o "$RUNNER_TEMP/dotnet-install.sh"
-
           bash "$RUNNER_TEMP/dotnet-install.sh" \
             --channel 8.0 \
             --install-dir "$RUNNER_TEMP/dotnet"
-
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
 
-      # 3. Verify .NET SDK
       - name: Verify .NET SDK
-        run: dotnet --info
+        run: |
+          dotnet --info
 
-      # 4. Diagnose SonarQube connectivity
-      - name: Diagnose SonarQube Connection
+      - name: Diagnose Runner and SonarQube Connectivity
         env:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         run: |
           set -e
 
+          echo "=== Runner diagnostics ==="
+          echo "Hostname: $(hostname)"
+          echo "User: $(whoami)"
+          echo "Runner name: ${RUNNER_NAME:-unknown}"
+          echo "Runner OS: ${RUNNER_OS:-unknown}"
+          echo "Runner architecture: ${RUNNER_ARCH:-unknown}"
+
+          echo "=== Validate SonarQube secret ==="
           if [ -z "$SONAR_HOST_URL" ]; then
             echo "ERROR: SONAR_HOST_URL secret is missing."
             exit 1
           fi
 
-          echo "Runner hostname: $(hostname)"
-          echo "Checking TCP port 9000..."
+          echo "SonarQube URL: $SONAR_HOST_URL"
 
+          echo "=== Check TCP connectivity ==="
           nc -vz -w 10 104.211.220.200 9000
 
-          echo "Checking SonarQube HTTP API..."
-
-          curl -fsS -v \
+          echo "=== Check SonarQube status ==="
+          curl --fail --silent --show-error \
             --connect-timeout 10 \
             --max-time 30 \
             "$SONAR_HOST_URL/api/system/status"
 
-          echo ""
+          echo
           echo "SonarQube connectivity check passed."
 
-      # 5. Install SonarScanner for .NET
       - name: Install SonarScanner for .NET
         run: |
-          dotnet tool install --global dotnet-sonarscanner \
-            || dotnet tool update --global dotnet-sonarscanner
+          dotnet tool install dotnet-sonarscanner \
+            --tool-path "$RUNNER_TEMP/dotnet-tools"
+          echo "$RUNNER_TEMP/dotnet-tools" >> "$GITHUB_PATH"
 
-          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
-
-      # 6. Verify SonarScanner
       - name: Verify SonarScanner
-        run: dotnet sonarscanner --version
+        run: |
+          dotnet-sonarscanner --version
 
-      # 7. Begin SonarQube analysis
       - name: Begin SonarQube Analysis
         env:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
@@ -107,49 +101,44 @@ jobs:
             exit 1
           fi
 
-          dotnet sonarscanner begin \
+          dotnet-sonarscanner begin \
             /k:"EduAdmin" \
+            /n:"EduAdmin" \
             /d:sonar.host.url="$SONAR_HOST_URL" \
             /d:sonar.token="$SONAR_TOKEN"
 
-      # 8. Restore dependencies
-      - name: Restore dependencies
-        run: dotnet restore StudentAPI.csproj
+      - name: Restore API dependencies
+        run: |
+          dotnet restore StudentAPI.csproj
 
-      # 9. Build API
       - name: Build API
         run: |
           dotnet build StudentAPI.csproj \
             --configuration Release \
             --no-restore
 
-      # 10. Run tests
       - name: Test API
         run: |
           dotnet test StudentAPI.csproj \
             --configuration Release \
             --no-build
 
-      # 11. Complete analysis and upload results
-      - name: End SonarQube Analysis
+      - name: Complete SonarQube Analysis
         if: success()
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_API }}
         run: |
-          dotnet sonarscanner end \
+          dotnet-sonarscanner end \
             /d:sonar.token="$SONAR_TOKEN"
 
-  # Stage 2: Build Angular frontend
   build-frontend:
     name: Build Angular Frontend
-    runs-on: [self-hosted, Linux, X64]
+    runs-on: [self-hosted, Linux, X64, onprem-kubeadm-runner]
 
     steps:
-      # 1. Checkout source code
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2. Setup Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -157,13 +146,10 @@ jobs:
           cache: npm
           cache-dependency-path: student-app/package-lock.json
 
-      # 3. Install dependencies
-      - name: Install dependencies
+      - name: Install frontend dependencies
         working-directory: student-app
         run: npm ci
 
-      # 4. Build Angular
-      - name: Build Angular
+      - name: Build Angular frontend
         working-directory: student-app
         run: npm run build
-

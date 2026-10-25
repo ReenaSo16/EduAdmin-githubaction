@@ -49,7 +49,6 @@ jobs:
       - name: Verify .NET SDK
         run: |
           dotnet --info
-          dotnet --list-sdks
 
       - name: Diagnose Runner and SonarQube Connectivity
         env:
@@ -61,15 +60,13 @@ jobs:
           echo "Hostname: $(hostname)"
           echo "User: $(whoami)"
           echo "Runner name: ${RUNNER_NAME:-unknown}"
-          echo "Runner OS: ${RUNNER_OS:-unknown}"
-          echo "Runner architecture: ${RUNNER_ARCH:-unknown}"
 
           if [ -z "$SONAR_HOST_URL" ]; then
             echo "ERROR: SONAR_HOST_URL secret is missing."
             exit 1
           fi
 
-          echo "=== Check SonarQube TCP connectivity ==="
+          echo "=== Check TCP connectivity ==="
           nc -vz -w 10 104.211.220.200 9000
 
           echo "=== Check SonarQube status ==="
@@ -107,8 +104,8 @@ jobs:
           fi
 
           dotnet-sonarscanner begin \
-            /k:"EduAdmin" \
-            /n:"EduAdmin" \
+            /k:"EduAdmin-API" \
+            /n:"EduAdmin-API" \
             /d:sonar.host.url="$SONAR_HOST_URL" \
             /d:sonar.token="$SONAR_TOKEN"
 

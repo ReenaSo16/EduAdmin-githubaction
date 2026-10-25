@@ -19,6 +19,8 @@ env:
   NODE_VERSION: '22'
   API_PROJECT: StudentAPI/StudentAPI/StudentAPI/StudentAPI.csproj
   API_DIR: StudentAPI/StudentAPI/StudentAPI
+  ACR_NAME: reenaacr1
+  ACR_LOGIN_SERVER: reenaacr1.azurecr.io
 
 jobs:
   # 1. API build and tests
@@ -229,9 +231,7 @@ jobs:
           rm -rf "$RUNNER_TEMP/sonar-scanner-extract"
           rm -f "$RUNNER_TEMP/sonar-scanner.zip"
 
-  # 5. Login to Azure
-  
-  # Install Azure CLI, authenticate, and validate Azure/ACR.
+    # 5. Login to Azure
   azure-login:
     name: Install Azure CLI and Validate Azure
     needs:
@@ -242,6 +242,10 @@ jobs:
     if: github.event_name != 'pull_request'
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 30
+
+    env:
+      ACR_NAME: reenaacr1
+      ACR_LOGIN_SERVER: reenaacr1.azurecr.io
 
     steps:
       - name: Checkout
@@ -256,7 +260,7 @@ jobs:
             echo "Azure CLI not found. Installing..."
 
             sudo -n dnf install -y \
-              https://packages.microsoft.com/config/rhel/8.0/packages-microsoft-prod.rpm
+              https://packages.microsoft.com/config/rhel/8/packages-microsoft-prod.rpm
 
             sudo -n dnf install -y azure-cli
           else
@@ -264,7 +268,6 @@ jobs:
           fi
 
           az version
-          az --version
 
       - name: Azure login
         uses: azure/login@v2
@@ -272,35 +275,33 @@ jobs:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
       - name: Validate subscription and ACR
-        env:
-          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
         shell: bash
         run: |
           set -euo pipefail
-
-          if [ -z "$ACR_LOGIN_SERVER" ]; then
-            echo "Missing GitHub secret: ACR_LOGIN_SERVER"
-            exit 1
-          fi
 
           az account show \
             --query '{subscription:name, subscriptionId:id, tenant:tenantId}' \
             --output table
 
-          ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
+          echo "Validating ACR: $ACR_NAME"
 
           az acr show \
             --name "$ACR_NAME" \
-            --query '{name:name, loginServer:loginServer}' \
+            --query '{name:name, loginServer:loginServer, resourceGroup:resourceGroup}' \
             --output table
 
-          echo "Azure CLI installation, login and ACR validation successful."
+          echo "Logging in to ACR..."
+          az acr login --name "$ACR_NAME"
+
+          echo "Azure login and ACR validation successful."
 
       - name: Azure logout
         if: always()
+        shell: bash
         run: az logout || true
 
-  # Build and push the API image in one job.
+
+  # 6. Build and push API image
   api-image:
     name: Build and Push API Image
     needs: azure-login
@@ -308,7 +309,8 @@ jobs:
     timeout-minutes: 30
 
     env:
-      ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+      ACR_NAME: reenaacr1
+      ACR_LOGIN_SERVER: reenaacr1.azurecr.io
       IMAGE_NAME: eduadmin-api
 
     steps:
@@ -319,11 +321,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           if ! command -v az >/dev/null 2>&1; then
             sudo -n dnf install -y \
-              https://packages.microsoft.com/config/rhel/8.0/packages-microsoft-prod.rpm
+              https://packages.microsoft.com/config/rhel/8/packages-microsoft-prod.rpm
             sudo -n dnf install -y azure-cli
           fi
+
           az version
 
       - name: Azure login
@@ -341,15 +345,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           test -f StudentAPI/StudentAPI/StudentAPI/Dockerfile
+          mkdir -p docker-context/api
+
           cp StudentAPI/StudentAPI/StudentAPI/Dockerfile \
             docker-context/api/Dockerfile
+
           test -n "$(find docker-context/api/publish -type f -print -quit)"
 
       - name: Build API image
         shell: bash
         run: |
           set -euo pipefail
+
           docker build \
             -t "$ACR_LOGIN_SERVER/$IMAGE_NAME:$GITHUB_SHA" \
             docker-context/api
@@ -358,21 +367,22 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
+
           az acr login --name "$ACR_NAME"
           docker push "$ACR_LOGIN_SERVER/$IMAGE_NAME:$GITHUB_SHA"
 
       - name: Cleanup
         if: always()
+        shell: bash
         run: |
-          docker logout "${ACR_LOGIN_SERVER:-invalid}" || true
+          docker logout "$ACR_LOGIN_SERVER" || true
           docker image rm \
-            "${ACR_LOGIN_SERVER:-invalid}/${IMAGE_NAME:-eduadmin-api}:${GITHUB_SHA}" \
-            || true
+            "$ACR_LOGIN_SERVER/$IMAGE_NAME:$GITHUB_SHA" || true
           rm -rf docker-context/api
           az logout || true
 
-  # Frontend runs only after the API image has been pushed.
+
+  # 7. Build and push frontend image
   frontend-image:
     name: Build and Push Frontend Image
     needs: api-image
@@ -380,7 +390,8 @@ jobs:
     timeout-minutes: 30
 
     env:
-      ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+      ACR_NAME: reenaacr1
+      ACR_LOGIN_SERVER: reenaacr1.azurecr.io
       IMAGE_NAME: eduadmin-frontend
 
     steps:
@@ -391,11 +402,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           if ! command -v az >/dev/null 2>&1; then
             sudo -n dnf install -y \
-              https://packages.microsoft.com/config/rhel/8.0/packages-microsoft-prod.rpm
+              https://packages.microsoft.com/config/rhel/8/packages-microsoft-prod.rpm
             sudo -n dnf install -y azure-cli
           fi
+
           az version
 
       - name: Azure login
@@ -413,14 +426,20 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           test -f student-app/Dockerfile
-          cp student-app/Dockerfile docker-context/frontend/Dockerfile
+          mkdir -p docker-context/frontend
+
+          cp student-app/Dockerfile \
+            docker-context/frontend/Dockerfile
+
           test -n "$(find docker-context/frontend/dist -type f -print -quit)"
 
       - name: Build frontend image
         shell: bash
         run: |
           set -euo pipefail
+
           docker build \
             -t "$ACR_LOGIN_SERVER/$IMAGE_NAME:$GITHUB_SHA" \
             docker-context/frontend
@@ -429,16 +448,16 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
+
           az acr login --name "$ACR_NAME"
           docker push "$ACR_LOGIN_SERVER/$IMAGE_NAME:$GITHUB_SHA"
 
       - name: Cleanup
         if: always()
+        shell: bash
         run: |
-          docker logout "${ACR_LOGIN_SERVER:-invalid}" || true
+          docker logout "$ACR_LOGIN_SERVER" || true
           docker image rm \
-            "${ACR_LOGIN_SERVER:-invalid}/${IMAGE_NAME:-eduadmin-frontend}:${GITHUB_SHA}" \
-            || true
+            "$ACR_LOGIN_SERVER/$IMAGE_NAME:$GITHUB_SHA" || true
           rm -rf docker-context/frontend
           az logout || true

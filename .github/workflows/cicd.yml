@@ -19,7 +19,7 @@ env:
 jobs:
   build-api:
     name: Build, Test and Analyze .NET API
-    runs-on: [self-hosted, Linux, X64, onprem-kubeadm-runner]
+    runs-on: [self-hosted, Linux, X64]
 
     defaults:
       run:
@@ -133,7 +133,7 @@ jobs:
 
   build-frontend:
     name: Build Angular Frontend
-    runs-on: [self-hosted, Linux, X64, onprem-kubeadm-runner]
+    runs-on: [self-hosted, Linux, X64]
 
     steps:
       - name: Checkout code

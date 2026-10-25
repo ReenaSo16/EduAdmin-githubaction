@@ -10,7 +10,6 @@ on:
 permissions:
   contents: read
 
-# Prevent overlapping pipeline runs for this repository.
 concurrency:
   group: eduadmin-main-pipeline
   cancel-in-progress: false
@@ -26,7 +25,7 @@ env:
 
 jobs:
 
-  # 1. Azure validation FIRST
+  # 01 - Azure login and ACR validation
   azure-login:
     name: "01 - Azure Login and ACR Validation"
     runs-on: [self-hosted, Linux, X64]
@@ -47,14 +46,14 @@ jobs:
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-          
 
-      - name: Validate subscription and registry
+      - name: Validate subscription and ACR
         shell: bash
         run: |
           set -euo pipefail
 
-          az account set --subscription "$AZURE_SUBSCRIPTION_ID"
+          az account set \
+            --subscription "$AZURE_SUBSCRIPTION_ID"
 
           echo "Azure subscription:"
           az account show \
@@ -76,8 +75,7 @@ jobs:
         shell: bash
         run: az logout || true
 
-
-  # 2. Build, test and publish API
+  # 02 - API build, test and publish
   api-build-test:
     name: "02 - API Build Test and Publish"
     needs: azure-login
@@ -88,12 +86,26 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0'
-          cache: true
-          cache-dependency-path: StudentAPI/StudentAPI/StudentAPI/*.csproj
+      - name: Install .NET SDK locally
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/dotnet"
+
+          curl -fsSL --retry 3 \
+            https://dot.net/v1/dotnet-install.sh \
+            -o "$RUNNER_TEMP/dotnet-install.sh"
+
+          bash "$RUNNER_TEMP/dotnet-install.sh" \
+            --channel 8.0 \
+            --install-dir "$RUNNER_TEMP/dotnet"
+
+          echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
+          echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
+
+      - name: Verify .NET SDK
+        run: dotnet --info
 
       - name: Restore
         working-directory: ${{ env.API_DIR }}
@@ -111,10 +123,18 @@ jobs:
         working-directory: ${{ env.API_DIR }}
         run: |
           set -euo pipefail
+
           dotnet publish StudentAPI.csproj \
             -c Release \
             --no-build \
             -o "$RUNNER_TEMP/api-publish"
+
+      - name: Verify published files
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -n "$(find "$RUNNER_TEMP/api-publish" -type f -print -quit)"
+          ls -la "$RUNNER_TEMP/api-publish"
 
       - name: Upload API artifact
         uses: actions/upload-artifact@v4
@@ -124,8 +144,12 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
+      - name: Cleanup local SDK installer
+        if: always()
+        shell: bash
+        run: rm -f "$RUNNER_TEMP/dotnet-install.sh"
 
-  # 3. API SonarQube analysis
+  # 03 - API SonarQube
   api-sonarqube:
     name: "03 - API SonarQube"
     needs: api-build-test
@@ -136,17 +160,32 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup .NET
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: '8.0'
-          cache: true
-          cache-dependency-path: StudentAPI/StudentAPI/StudentAPI/*.csproj
+      - name: Install .NET SDK locally
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          mkdir -p "$RUNNER_TEMP/dotnet"
+
+          curl -fsSL --retry 3 \
+            https://dot.net/v1/dotnet-install.sh \
+            -o "$RUNNER_TEMP/dotnet-install.sh"
+
+          bash "$RUNNER_TEMP/dotnet-install.sh" \
+            --channel 8.0 \
+            --install-dir "$RUNNER_TEMP/dotnet"
+
+          echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
+          echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
+
+      - name: Verify .NET SDK
+        run: dotnet --info
 
       - name: Install SonarScanner
         shell: bash
         run: |
           set -euo pipefail
+
           mkdir -p "$RUNNER_TEMP/dotnet-tools"
 
           dotnet tool install dotnet-sonarscanner \
@@ -169,9 +208,13 @@ jobs:
             /d:sonar.token="$SONAR_TOKEN" \
             /d:sonar.qualitygate.wait=true
 
-      - name: Build for analysis
+      - name: Restore for analysis
         working-directory: ${{ env.API_DIR }}
-        run: dotnet build StudentAPI.csproj -c Release
+        run: dotnet restore StudentAPI.csproj
+
+      - name: Build with Sonar analysis
+        working-directory: ${{ env.API_DIR }}
+        run: dotnet build StudentAPI.csproj -c Release --no-restore
 
       - name: Complete API analysis
         working-directory: ${{ env.API_DIR }}
@@ -181,8 +224,14 @@ jobs:
           dotnet-sonarscanner end \
             /d:sonar.token="$SONAR_TOKEN"
 
+      - name: Cleanup scanner and installer files
+        if: always()
+        shell: bash
+        run: |
+          rm -rf "$RUNNER_TEMP/dotnet-tools"
+          rm -f "$RUNNER_TEMP/dotnet-install.sh"
 
-  # 4. Build Angular frontend
+  # 04 - Angular build
   frontend-build:
     name: "04 - Angular Build"
     needs: api-sonarqube
@@ -212,8 +261,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           test -d student-app/dist/student-app
           test -n "$(find student-app/dist/student-app -type f -print -quit)"
+
+          echo "Angular build output:"
+          find student-app/dist/student-app -maxdepth 3 -type f | head -30
 
       - name: Upload frontend artifact
         uses: actions/upload-artifact@v4
@@ -223,8 +276,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-
-  # 5. Frontend SonarQube analysis
+  # 05 - Frontend SonarQube
   frontend-sonarqube:
     name: "05 - Frontend SonarQube"
     needs: frontend-build
@@ -246,6 +298,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           VERSION="7.1.0.4889"
           ARCHIVE="$RUNNER_TEMP/sonar-scanner.zip"
           EXTRACT_DIR="$RUNNER_TEMP/sonar-scanner-extract"
@@ -279,8 +332,14 @@ jobs:
             -Dsonar.qualitygate.wait=true \
             -Dsonar.exclusions="**/node_modules/**,**/dist/**"
 
+      - name: Cleanup scanner files
+        if: always()
+        shell: bash
+        run: |
+          rm -rf "$RUNNER_TEMP/sonar-scanner-extract"
+          rm -f "$RUNNER_TEMP/sonar-scanner.zip"
 
-  # 6. Build and push API image
+  # 06 - Build and push API image
   api-image:
     name: "06 - Build and Push API Image"
     needs: frontend-sonarqube
@@ -295,7 +354,6 @@ jobs:
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-          subscription-id: 148b2a40-f782-4d5f-a639-c8a9204fb98b
 
       - name: Download API artifact
         uses: actions/download-artifact@v4
@@ -308,8 +366,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p docker-context/api
           test -f StudentAPI/StudentAPI/StudentAPI/Dockerfile
+          mkdir -p docker-context/api
 
           cp StudentAPI/StudentAPI/StudentAPI/Dockerfile \
             docker-context/api/Dockerfile
@@ -329,11 +387,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           az acr login \
             --name "$ACR_NAME" \
             --subscription "$AZURE_SUBSCRIPTION_ID"
 
       - name: Push API image
+        shell: bash
         run: |
           set -euo pipefail
           docker push "$ACR_LOGIN_SERVER/eduadmin-api:$GITHUB_SHA"
@@ -347,8 +407,7 @@ jobs:
           rm -rf docker-context/api
           az logout || true
 
-
-  # 7. Build and push frontend image AFTER API push
+  # 07 - Build and push frontend image
   frontend-image:
     name: "07 - Build and Push Frontend Image"
     needs: api-image
@@ -363,7 +422,6 @@ jobs:
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-          subscription-id: 148b2a40-f782-4d5f-a639-c8a9204fb98b
 
       - name: Download frontend artifact
         uses: actions/download-artifact@v4
@@ -376,8 +434,8 @@ jobs:
         run: |
           set -euo pipefail
 
-          mkdir -p docker-context/frontend
           test -f student-app/Dockerfile
+          mkdir -p docker-context/frontend
 
           cp student-app/Dockerfile \
             docker-context/frontend/Dockerfile
@@ -397,11 +455,13 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+
           az acr login \
             --name "$ACR_NAME" \
             --subscription "$AZURE_SUBSCRIPTION_ID"
 
       - name: Push frontend image
+        shell: bash
         run: |
           set -euo pipefail
           docker push "$ACR_LOGIN_SERVER/eduadmin-frontend:$GITHUB_SHA"

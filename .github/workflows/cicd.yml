@@ -12,6 +12,7 @@ on:
 permissions:
   contents: read
 
+# Do not run two workflows for the same branch/ref concurrently.
 concurrency:
   group: eduadmin-ci-${{ github.ref }}
   cancel-in-progress: false
@@ -67,7 +68,6 @@ jobs:
             --connect-timeout 10 \
             --max-time 30 \
             "${SONAR_HOST_URL%/}/api/system/status"
-
           echo
 
       - name: Install SonarScanner for .NET
@@ -131,7 +131,7 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Clean temporary API build files
+      - name: Clean temporary API files
         if: always()
         working-directory: .
         run: |
@@ -144,7 +144,7 @@ jobs:
     name: Build and Analyze Angular Frontend
     needs: build-api
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 30
+    timeout-minutes: 60
 
     steps:
       - name: Checkout code
@@ -157,16 +157,14 @@ jobs:
 
       - name: Install frontend dependencies
         working-directory: student-app
-        run: npm ci --no-audit --no-fund
+        timeout-minutes: 20
+        run: |
+          set -e
+          npm ci --no-audit --no-fund --progress=false
 
       - name: Build Angular frontend
         working-directory: student-app
         run: npm run build
-
-      - name: Clean npm cache and dependencies
-        run: |
-          npm cache clean --force
-          rm -rf student-app/node_modules
 
       - name: Prepare SonarScanner CLI
         run: |
@@ -183,7 +181,7 @@ jobs:
             "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${VERSION}-linux-x64.zip" \
             -o "$ARCHIVE"
 
-          unzip -q "$ARCHIVE" -d "$EXTRACT_DIR"
+          unzip -q -o "$ARCHIVE" -d "$EXTRACT_DIR"
 
           mv "$EXTRACT_DIR/sonar-scanner-${VERSION}-linux-x64" \
             "$SCANNER_DIR"
@@ -217,9 +215,11 @@ jobs:
           if-no-files-found: error
           retention-days: 14
 
-      - name: Clean temporary frontend scanner files
+      - name: Clean temporary frontend files
         if: always()
         run: |
           rm -rf "$RUNNER_TEMP/sonar-scanner"
           rm -rf "$RUNNER_TEMP/sonar-scanner-extract"
           rm -f "$RUNNER_TEMP/sonar-scanner.zip"
+          rm -rf student-app/node_modules
+          npm cache clean --force || true

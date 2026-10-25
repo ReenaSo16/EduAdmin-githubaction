@@ -47,7 +47,7 @@ jobs:
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
-          subscription-id: 148b2a40-f782-4d5f-a639-c8a9204fb98b
+          
 
       - name: Validate subscription and registry
         shell: bash

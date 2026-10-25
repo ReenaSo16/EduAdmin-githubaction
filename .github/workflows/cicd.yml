@@ -33,18 +33,23 @@ jobs:
       - name: Install .NET 8 SDK
         shell: bash
         run: |
+          set -e
           mkdir -p "$RUNNER_TEMP/dotnet"
+
           curl -fsSL https://dot.net/v1/dotnet-install.sh \
             -o "$RUNNER_TEMP/dotnet-install.sh"
+
           bash "$RUNNER_TEMP/dotnet-install.sh" \
             --channel 8.0 \
             --install-dir "$RUNNER_TEMP/dotnet"
+
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
 
       - name: Verify .NET SDK
         run: |
           dotnet --info
+          dotnet --list-sdks
 
       - name: Diagnose Runner and SonarQube Connectivity
         env:
@@ -59,35 +64,35 @@ jobs:
           echo "Runner OS: ${RUNNER_OS:-unknown}"
           echo "Runner architecture: ${RUNNER_ARCH:-unknown}"
 
-          echo "=== Validate SonarQube secret ==="
           if [ -z "$SONAR_HOST_URL" ]; then
             echo "ERROR: SONAR_HOST_URL secret is missing."
             exit 1
           fi
 
-          echo "SonarQube URL: $SONAR_HOST_URL"
-
-          echo "=== Check TCP connectivity ==="
+          echo "=== Check SonarQube TCP connectivity ==="
           nc -vz -w 10 104.211.220.200 9000
 
           echo "=== Check SonarQube status ==="
           curl --fail --silent --show-error \
             --connect-timeout 10 \
             --max-time 30 \
-            "$SONAR_HOST_URL/api/system/status"
+            "${SONAR_HOST_URL%/}/api/system/status"
 
           echo
           echo "SonarQube connectivity check passed."
 
       - name: Install SonarScanner for .NET
         run: |
+          set -e
           dotnet tool install dotnet-sonarscanner \
             --tool-path "$RUNNER_TEMP/dotnet-tools"
+
           echo "$RUNNER_TEMP/dotnet-tools" >> "$GITHUB_PATH"
 
-      - name: Verify SonarScanner
+      - name: Verify SonarScanner installation
         run: |
-          dotnet-sonarscanner --version
+          test -x "$RUNNER_TEMP/dotnet-tools/dotnet-sonarscanner"
+          echo "SonarScanner is installed successfully."
 
       - name: Begin SonarQube Analysis
         env:

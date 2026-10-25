@@ -1,153 +1,151 @@
-name: EduAdmin CI SonarQube and Artifacts
+name: EduAdmin Staged CI CD
 
 on:
   push:
-    branches:
-      - main
+    branches: [main]
   pull_request:
-    branches:
-      - main
+    branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Do not run two workflows for the same branch/ref concurrently.
 concurrency:
-  group: eduadmin-ci-${{ github.ref }}
+  group: eduadmin-${{ github.ref }}
   cancel-in-progress: false
 
 env:
   DOTNET_VERSION: '8.0'
   NODE_VERSION: '22'
+  API_PROJECT: StudentAPI/StudentAPI/StudentAPI/StudentAPI.csproj
+  API_DIR: StudentAPI/StudentAPI/StudentAPI
 
 jobs:
-  build-api:
-    name: Build, Test and Analyze .NET API
+  # 1. API build and tests
+  api-build-test:
+    name: "01 - API Build and Test"
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 30
 
-    defaults:
-      run:
-        shell: bash
-        working-directory: StudentAPI/StudentAPI/StudentAPI
-
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install .NET 8 SDK
+      - name: Install .NET SDK
+        shell: bash
         run: |
           set -e
           mkdir -p "$RUNNER_TEMP/dotnet"
-
-          curl -fsSL --retry 3 \
-            https://dot.net/v1/dotnet-install.sh \
+          curl -fsSL --retry 3 https://dot.net/v1/dotnet-install.sh \
             -o "$RUNNER_TEMP/dotnet-install.sh"
-
           bash "$RUNNER_TEMP/dotnet-install.sh" \
-            --channel 8.0 \
-            --install-dir "$RUNNER_TEMP/dotnet"
-
+            --channel 8.0 --install-dir "$RUNNER_TEMP/dotnet"
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
 
-      - name: Verify .NET SDK
-        run: dotnet --info
+      - name: Restore
+        working-directory: ${{ env.API_DIR }}
+        run: dotnet restore StudentAPI.csproj
 
-      - name: Check SonarQube connectivity
-        env:
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+      - name: Build
+        working-directory: ${{ env.API_DIR }}
+        run: dotnet build StudentAPI.csproj -c Release --no-restore
+
+      - name: Test
+        working-directory: ${{ env.API_DIR }}
+        run: dotnet test StudentAPI.csproj -c Release --no-build
+
+      - name: Publish API
+        working-directory: ${{ env.API_DIR }}
+        run: |
+          dotnet publish StudentAPI.csproj -c Release --no-build \
+            -o "$RUNNER_TEMP/api-publish"
+
+      - name: Upload API publish artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eduadmin-api-publish
+          path: ${{ runner.temp }}/api-publish/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Cleanup SDK
+        if: always()
+        run: |
+          rm -rf "$RUNNER_TEMP/dotnet"
+          rm -f "$RUNNER_TEMP/dotnet-install.sh"
+
+  # 2. API SonarQube analysis
+  api-sonarqube:
+    name: "02 - API SonarQube"
+    needs: api-build-test
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install .NET SDK
         run: |
           set -e
-          test -n "$SONAR_HOST_URL"
+          mkdir -p "$RUNNER_TEMP/dotnet"
+          curl -fsSL --retry 3 https://dot.net/v1/dotnet-install.sh \
+            -o "$RUNNER_TEMP/dotnet-install.sh"
+          bash "$RUNNER_TEMP/dotnet-install.sh" \
+            --channel 8.0 --install-dir "$RUNNER_TEMP/dotnet"
+          echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
+          echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
 
-          nc -vz -w 10 104.211.220.200 9000
-
-          curl --fail --silent --show-error \
-            --connect-timeout 10 \
-            --max-time 30 \
-            "${SONAR_HOST_URL%/}/api/system/status"
-          echo
-
-      - name: Install SonarScanner for .NET
+      - name: Install SonarScanner
         run: |
-          set -e
-          mkdir -p "$RUNNER_TEMP/dotnet-tools"
-
           dotnet tool install dotnet-sonarscanner \
             --tool-path "$RUNNER_TEMP/dotnet-tools"
-
           echo "$RUNNER_TEMP/dotnet-tools" >> "$GITHUB_PATH"
 
-      - name: Begin API SonarQube Analysis
+      - name: Begin API analysis
+        working-directory: ${{ env.API_DIR }}
         env:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_API }}
         run: |
           set -e
-          test -n "$SONAR_TOKEN"
-
           dotnet-sonarscanner begin \
             /k:"EduAdmin-API" \
             /n:"EduAdmin-API" \
             /d:sonar.host.url="$SONAR_HOST_URL" \
             /d:sonar.token="$SONAR_TOKEN"
 
-      - name: Restore API dependencies
+      - name: Restore for analysis
+        working-directory: ${{ env.API_DIR }}
         run: dotnet restore StudentAPI.csproj
 
-      - name: Build API
-        run: |
-          dotnet build StudentAPI.csproj \
-            --configuration Release \
-            --no-restore
+      - name: Build with Sonar analysis
+        working-directory: ${{ env.API_DIR }}
+        run: dotnet build StudentAPI.csproj -c Release --no-restore
 
-      - name: Test API
-        run: |
-          dotnet test StudentAPI.csproj \
-            --configuration Release \
-            --no-build
-
-      - name: Complete API SonarQube Analysis
+      - name: Complete API analysis
+        working-directory: ${{ env.API_DIR }}
         env:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_API }}
-        run: |
-          dotnet-sonarscanner end \
-            /d:sonar.token="$SONAR_TOKEN"
+        run: dotnet-sonarscanner end /d:sonar.token="$SONAR_TOKEN"
 
-      - name: Publish API
-        run: |
-          dotnet publish StudentAPI.csproj \
-            --configuration Release \
-            --no-build \
-            --output "$RUNNER_TEMP/api-publish"
-
-      - name: Upload API Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: eduadmin-api
-          path: ${{ runner.temp }}/api-publish/
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Clean temporary API files
+      - name: Cleanup scanner and SDK
         if: always()
-        working-directory: .
         run: |
           rm -rf "$RUNNER_TEMP/dotnet"
           rm -rf "$RUNNER_TEMP/dotnet-tools"
-          rm -rf "$RUNNER_TEMP/api-publish"
           rm -f "$RUNNER_TEMP/dotnet-install.sh"
 
-  build-frontend:
-    name: Build and Analyze Angular Frontend
-    needs: build-api
+  # 3. Frontend build
+  frontend-build:
+    name: "03 - Angular Build"
+    needs: api-sonarqube
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 60
 
     steps:
-      - name: Checkout code
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup Node.js
@@ -155,49 +153,67 @@ jobs:
         with:
           node-version: '22'
 
-      - name: Install frontend dependencies
+      - name: Install dependencies
         working-directory: student-app
         timeout-minutes: 20
-        run: |
-          set -e
-          npm ci --no-audit --no-fund --progress=false
+        run: npm ci --no-audit --no-fund --progress=false
 
-      - name: Build Angular frontend
+      - name: Build Angular
         working-directory: student-app
         run: npm run build
 
-      - name: Prepare SonarScanner CLI
+      - name: Upload frontend build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: eduadmin-frontend-dist
+          path: student-app/dist/student-app/
+          if-no-files-found: error
+          retention-days: 14
+
+      - name: Cleanup npm files
+        if: always()
+        run: |
+          rm -rf student-app/node_modules
+          npm cache clean --force || true
+
+  # 4. Frontend SonarQube analysis
+  frontend-sonarqube:
+    name: "04 - Frontend SonarQube"
+    needs: frontend-build
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install SonarScanner CLI
         run: |
           set -e
-
           VERSION="7.1.0.4889"
           ARCHIVE="$RUNNER_TEMP/sonar-scanner.zip"
           EXTRACT_DIR="$RUNNER_TEMP/sonar-scanner-extract"
-          SCANNER_DIR="$RUNNER_TEMP/sonar-scanner"
 
           mkdir -p "$EXTRACT_DIR"
-
           curl -fsSL --retry 3 \
             "https://binaries.sonarsource.com/Distribution/sonar-scanner-cli/sonar-scanner-cli-${VERSION}-linux-x64.zip" \
             -o "$ARCHIVE"
-
           unzip -q -o "$ARCHIVE" -d "$EXTRACT_DIR"
+          echo "$EXTRACT_DIR/sonar-scanner-${VERSION}-linux-x64/bin" \
+            >> "$GITHUB_PATH"
 
-          mv "$EXTRACT_DIR/sonar-scanner-${VERSION}-linux-x64" \
-            "$SCANNER_DIR"
-
-          echo "$SCANNER_DIR/bin" >> "$GITHUB_PATH"
-
-      - name: Analyze Angular Frontend in SonarQube
+      - name: Analyze frontend
         working-directory: student-app
         env:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_FRONTEND }}
         run: |
           set -e
-          test -n "$SONAR_HOST_URL"
-          test -n "$SONAR_TOKEN"
-
           sonar-scanner \
             -Dsonar.projectKey=EduAdmin-Frontend \
             -Dsonar.projectName=EduAdmin-Frontend \
@@ -207,19 +223,205 @@ jobs:
             -Dsonar.sourceEncoding=UTF-8 \
             -Dsonar.exclusions="**/node_modules/**,**/dist/**"
 
-      - name: Upload Angular Build Artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: eduadmin-frontend
-          path: student-app/dist/student-app/
-          if-no-files-found: error
-          retention-days: 14
-
-      - name: Clean temporary frontend files
+      - name: Cleanup scanner files
         if: always()
         run: |
-          rm -rf "$RUNNER_TEMP/sonar-scanner"
           rm -rf "$RUNNER_TEMP/sonar-scanner-extract"
           rm -f "$RUNNER_TEMP/sonar-scanner.zip"
-          rm -rf student-app/node_modules
-          npm cache clean --force || true
+
+  # 5. Login to Azure
+  azure-login:
+    name: "05 - Azure Login"
+    needs: [api-build-test, api-sonarqube, frontend-build, frontend-sonarqube]
+    if: github.event_name != 'pull_request'
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 10
+
+    steps:
+      - name: Install Azure CLI if missing
+        run: |
+          if ! command -v az >/dev/null 2>&1; then
+            echo "Azure CLI is required on the self-hosted runner."
+            exit 1
+          fi
+          az version
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Verify ACR access
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          set -e
+          test -n "$ACR_LOGIN_SERVER"
+          ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
+          az acr show --name "$ACR_NAME" --query loginServer -o tsv
+
+  # 6. Build API Docker image
+  api-image-build:
+    name: "06 - Build API Docker Image"
+    needs: azure-login
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download API publish artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: eduadmin-api-publish
+          path: docker-context/api/publish
+
+      - name: Prepare API Dockerfile
+        run: |
+          set -e
+          test -f "$API_DIR/Dockerfile"
+          cp "$API_DIR/Dockerfile" docker-context/api/Dockerfile
+
+      - name: Build API image
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          set -e
+          docker build \
+            -f docker-context/api/Dockerfile \
+            -t "$ACR_LOGIN_SERVER/eduadmin-api:$GITHUB_SHA" \
+            docker-context/api
+
+      - name: Save API image
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          docker save "$ACR_LOGIN_SERVER/eduadmin-api:$GITHUB_SHA" \
+            -o "$RUNNER_TEMP/eduadmin-api-image.tar"
+
+      - name: Upload API image bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: eduadmin-api-image
+          path: ${{ runner.temp }}/eduadmin-api-image.tar
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Cleanup API Docker build context
+        if: always()
+        run: rm -rf docker-context/api
+
+  # 7. Push API image
+  api-image-push:
+    name: "07 - Push API Image to ACR"
+    needs: api-image-build
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+
+    steps:
+      - name: Download API image bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: eduadmin-api-image
+          path: ${{ runner.temp }}/api-image
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Import and push API image
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          set -e
+          docker load -i "$RUNNER_TEMP/api-image/eduadmin-api-image.tar"
+          az acr login --name "${ACR_LOGIN_SERVER%%.*}"
+          docker push "$ACR_LOGIN_SERVER/eduadmin-api:$GITHUB_SHA"
+          docker logout "$ACR_LOGIN_SERVER" || true
+          rm -rf "$RUNNER_TEMP/api-image"
+          rm -f "$RUNNER_TEMP/eduadmin-api-image.tar"
+
+  # 8. Build frontend Docker image
+  frontend-image-build:
+    name: "08 - Build Frontend Docker Image"
+    needs: api-image-push
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Download frontend build artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: eduadmin-frontend-dist
+          path: docker-context/frontend/dist
+
+      - name: Prepare frontend Dockerfile
+        run: |
+          set -e
+          test -f student-app/Dockerfile
+          cp student-app/Dockerfile docker-context/frontend/Dockerfile
+
+      - name: Build frontend image
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          set -e
+          docker build \
+            -f docker-context/frontend/Dockerfile \
+            -t "$ACR_LOGIN_SERVER/eduadmin-frontend:$GITHUB_SHA" \
+            docker-context/frontend
+
+      - name: Save frontend image
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          docker save "$ACR_LOGIN_SERVER/eduadmin-frontend:$GITHUB_SHA" \
+            -o "$RUNNER_TEMP/eduadmin-frontend-image.tar"
+
+      - name: Upload frontend image bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: eduadmin-frontend-image
+          path: ${{ runner.temp }}/eduadmin-frontend-image.tar
+          if-no-files-found: error
+          retention-days: 1
+
+      - name: Cleanup frontend Docker context
+        if: always()
+        run: rm -rf docker-context/frontend
+
+  # 9. Push frontend image
+  frontend-image-push:
+    name: "09 - Push Frontend Image to ACR"
+    needs: frontend-image-build
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+
+    steps:
+      - name: Download frontend image bundle
+        uses: actions/download-artifact@v4
+        with:
+          name: eduadmin-frontend-image
+          path: ${{ runner.temp }}/frontend-image
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Import and push frontend image
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        run: |
+          set -e
+          docker load -i "$RUNNER_TEMP/frontend-image/eduadmin-frontend-image.tar"
+          az acr login --name "${ACR_LOGIN_SERVER%%.*}"
+          docker push "$ACR_LOGIN_SERVER/eduadmin-frontend:$GITHUB_SHA"
+          docker logout "$ACR_LOGIN_SERVER" || true
+          rm -rf "$RUNNER_TEMP/frontend-image"
+          rm -f "$RUNNER_TEMP/eduadmin-frontend-image.tar"

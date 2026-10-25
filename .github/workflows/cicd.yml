@@ -1,11 +1,14 @@
 name: EduAdmin Build and SonarQube
+
 on:
   push:
     branches:
       - main
+
   pull_request:
     branches:
       - main
+
   workflow_dispatch:
 
 permissions:
@@ -17,9 +20,9 @@ env:
 
 jobs:
 
-  # Stage 1: Build and test .NET API
+  # Stage 1: Build, Test and Analyze .NET API
   build-api:
-    name: Build and Test .NET API
+    name: Build and Analyze .NET API
     runs-on: [self-hosted, Linux, X64]
 
     defaults:
@@ -28,31 +31,85 @@ jobs:
         working-directory: StudentAPI/StudentAPI/StudentAPI
 
     steps:
+      # 1. Checkout source code
       - name: Checkout code
         uses: actions/checkout@v4
 
-      - name: Install .NET 8 in runner workspace
+      # 2. Install .NET SDK
+      - name: Install .NET 8
         shell: bash
         run: |
           mkdir -p "$RUNNER_TEMP/dotnet"
+
           curl -fsSL https://dot.net/v1/dotnet-install.sh \
             -o "$RUNNER_TEMP/dotnet-install.sh"
+
           bash "$RUNNER_TEMP/dotnet-install.sh" \
             --channel 8.0 \
             --install-dir "$RUNNER_TEMP/dotnet"
+
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
+
+      # 3. Verify SDK
       - name: Verify .NET SDK
+        run: dotnet --info
+
+      # 4. Install SonarScanner
+      - name: Install SonarScanner for .NET
         run: |
-          "$RUNNER_TEMP/dotnet/dotnet" --info
+          dotnet tool install --global dotnet-sonarscanner \
+            || dotnet tool update --global dotnet-sonarscanner
+
+          echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
+
+      # 5. Check SonarQube connectivity
+      - name: Check SonarQube Server
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          curl -fsS \
+            --connect-timeout 5 \
+            --max-time 20 \
+            "$SONAR_HOST_URL/api/system/status"
+
+      # 6. Begin SonarQube analysis
+      - name: Begin SonarQube Analysis
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_API }}
+        run: |
+          dotnet sonarscanner begin \
+            /k:"EduAdmin" \
+            /d:sonar.host.url="$SONAR_HOST_URL" \
+            /d:sonar.token="$SONAR_TOKEN"
+
+      # 7. Restore dependencies
       - name: Restore dependencies
         run: dotnet restore StudentAPI.csproj
 
+      # 8. Build API
       - name: Build API
-        run: dotnet build StudentAPI.csproj --configuration Release --no-restore
+        run: |
+          dotnet build StudentAPI.csproj \
+            --configuration Release \
+            --no-restore
 
+      # 9. Run tests
       - name: Test API
-        run: dotnet test StudentAPI.csproj --configuration Release --no-build
+        run: |
+          dotnet test StudentAPI.csproj \
+            --configuration Release \
+            --no-build
+
+      # 10. End analysis and upload results
+      - name: End SonarQube Analysis
+        if: success()
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_API }}
+        run: |
+          dotnet sonarscanner end \
+            /d:sonar.token="$SONAR_TOKEN"
 
   # Stage 2: Build Angular frontend
   build-frontend:
@@ -60,9 +117,11 @@ jobs:
     runs-on: [self-hosted, Linux, X64]
 
     steps:
+      # 1. Checkout source code
       - name: Checkout code
         uses: actions/checkout@v4
 
+      # 2. Setup Node.js
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -70,10 +129,13 @@ jobs:
           cache: npm
           cache-dependency-path: student-app/package-lock.json
 
+      # 3. Install dependencies
       - name: Install dependencies
         working-directory: student-app
         run: npm ci
 
+      # 4. Build Angular
       - name: Build Angular
         working-directory: student-app
         run: npm run build
+

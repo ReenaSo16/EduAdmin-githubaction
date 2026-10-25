@@ -230,19 +230,99 @@ jobs:
           rm -f "$RUNNER_TEMP/sonar-scanner.zip"
 
   # 5. Login to Azure
+  
+  # Install Azure CLI, authenticate, and validate Azure/ACR.
   azure-login:
-    name: "05 - Azure Login"
-    needs: [api-build-test, api-sonarqube, frontend-build, frontend-sonarqube]
+    name: Install Azure CLI and Validate Azure
+    needs:
+      - api-build-test
+      - api-sonarqube
+      - frontend-build
+      - frontend-sonarqube
     if: github.event_name != 'pull_request'
     runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 10
+    timeout-minutes: 30
 
     steps:
-      - name: Install Azure CLI if missing
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Azure CLI through pipeline
+        shell: bash
         run: |
+          set -euo pipefail
+
           if ! command -v az >/dev/null 2>&1; then
-            echo "Azure CLI is required on the self-hosted runner."
+            echo "Azure CLI not found. Installing..."
+
+            sudo -n dnf install -y \
+              https://packages.microsoft.com/config/rhel/8.0/packages-microsoft-prod.rpm
+
+            sudo -n dnf install -y azure-cli
+          else
+            echo "Azure CLI is already installed."
+          fi
+
+          az version
+          az --version
+
+      - name: Azure login
+        uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Validate subscription and ACR
+        env:
+          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          if [ -z "$ACR_LOGIN_SERVER" ]; then
+            echo "Missing GitHub secret: ACR_LOGIN_SERVER"
             exit 1
+          fi
+
+          az account show \
+            --query '{subscription:name, subscriptionId:id, tenant:tenantId}' \
+            --output table
+
+          ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
+
+          az acr show \
+            --name "$ACR_NAME" \
+            --query '{name:name, loginServer:loginServer}' \
+            --output table
+
+          echo "Azure CLI installation, login and ACR validation successful."
+
+      - name: Azure logout
+        if: always()
+        run: az logout || true
+
+  # Build and push the API image in one job.
+  api-image:
+    name: Build and Push API Image
+    needs: azure-login
+    runs-on: [self-hosted, Linux, X64]
+    timeout-minutes: 30
+
+    env:
+      ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+      IMAGE_NAME: eduadmin-api
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Azure CLI through pipeline
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v az >/dev/null 2>&1; then
+            sudo -n dnf install -y \
+              https://packages.microsoft.com/config/rhel/8.0/packages-microsoft-prod.rpm
+            sudo -n dnf install -y azure-cli
           fi
           az version
 
@@ -251,177 +331,114 @@ jobs:
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Verify ACR access
-        env:
-          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-        run: |
-          set -e
-          test -n "$ACR_LOGIN_SERVER"
-          ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
-          az acr show --name "$ACR_NAME" --query loginServer -o tsv
-
-  # 6. Build API Docker image
-  api-image-build:
-    name: "06 - Build API Docker Image"
-    needs: azure-login
-    runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download API publish artifact
+      - name: Download published API artifact
         uses: actions/download-artifact@v4
         with:
           name: eduadmin-api-publish
           path: docker-context/api/publish
 
       - name: Prepare API Dockerfile
+        shell: bash
         run: |
-          set -e
-          test -f "$API_DIR/Dockerfile"
-          cp "$API_DIR/Dockerfile" docker-context/api/Dockerfile
+          set -euo pipefail
+          test -f StudentAPI/StudentAPI/StudentAPI/Dockerfile
+          cp StudentAPI/StudentAPI/StudentAPI/Dockerfile \
+            docker-context/api/Dockerfile
+          test -n "$(find docker-context/api/publish -type f -print -quit)"
 
       - name: Build API image
-        env:
-          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
           docker build \
-            -f docker-context/api/Dockerfile \
-            -t "$ACR_LOGIN_SERVER/eduadmin-api:$GITHUB_SHA" \
+            -t "$ACR_LOGIN_SERVER/$IMAGE_NAME:$GITHUB_SHA" \
             docker-context/api
 
-      - name: Save API image
-        env:
-          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+      - name: Push API image to ACR
+        shell: bash
         run: |
-          docker save "$ACR_LOGIN_SERVER/eduadmin-api:$GITHUB_SHA" \
-            -o "$RUNNER_TEMP/eduadmin-api-image.tar"
+          set -euo pipefail
+          ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
+          az acr login --name "$ACR_NAME"
+          docker push "$ACR_LOGIN_SERVER/$IMAGE_NAME:$GITHUB_SHA"
 
-      - name: Upload API image bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: eduadmin-api-image
-          path: ${{ runner.temp }}/eduadmin-api-image.tar
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Cleanup API Docker build context
+      - name: Cleanup
         if: always()
-        run: rm -rf docker-context/api
+        run: |
+          docker logout "${ACR_LOGIN_SERVER:-invalid}" || true
+          docker image rm \
+            "${ACR_LOGIN_SERVER:-invalid}/${IMAGE_NAME:-eduadmin-api}:${GITHUB_SHA}" \
+            || true
+          rm -rf docker-context/api
+          az logout || true
 
-  # 7. Push API image
-  api-image-push:
-    name: "07 - Push API Image to ACR"
-    needs: api-image-build
+  # Frontend runs only after the API image has been pushed.
+  frontend-image:
+    name: Build and Push Frontend Image
+    needs: api-image
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 30
 
+    env:
+      ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+      IMAGE_NAME: eduadmin-frontend
+
     steps:
-      - name: Download API image bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: eduadmin-api-image
-          path: ${{ runner.temp }}/api-image
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install Azure CLI through pipeline
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! command -v az >/dev/null 2>&1; then
+            sudo -n dnf install -y \
+              https://packages.microsoft.com/config/rhel/8.0/packages-microsoft-prod.rpm
+            sudo -n dnf install -y azure-cli
+          fi
+          az version
 
       - name: Azure login
         uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
 
-      - name: Import and push API image
-        env:
-          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-        run: |
-          set -e
-          docker load -i "$RUNNER_TEMP/api-image/eduadmin-api-image.tar"
-          az acr login --name "${ACR_LOGIN_SERVER%%.*}"
-          docker push "$ACR_LOGIN_SERVER/eduadmin-api:$GITHUB_SHA"
-          docker logout "$ACR_LOGIN_SERVER" || true
-          rm -rf "$RUNNER_TEMP/api-image"
-          rm -f "$RUNNER_TEMP/eduadmin-api-image.tar"
-
-  # 8. Build frontend Docker image
-  frontend-image-build:
-    name: "08 - Build Frontend Docker Image"
-    needs: api-image-push
-    runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Download frontend build artifact
+      - name: Download Angular build artifact
         uses: actions/download-artifact@v4
         with:
           name: eduadmin-frontend-dist
           path: docker-context/frontend/dist
 
       - name: Prepare frontend Dockerfile
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
           test -f student-app/Dockerfile
           cp student-app/Dockerfile docker-context/frontend/Dockerfile
+          test -n "$(find docker-context/frontend/dist -type f -print -quit)"
 
       - name: Build frontend image
-        env:
-          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+        shell: bash
         run: |
-          set -e
+          set -euo pipefail
           docker build \
-            -f docker-context/frontend/Dockerfile \
-            -t "$ACR_LOGIN_SERVER/eduadmin-frontend:$GITHUB_SHA" \
+            -t "$ACR_LOGIN_SERVER/$IMAGE_NAME:$GITHUB_SHA" \
             docker-context/frontend
 
-      - name: Save frontend image
-        env:
-          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+      - name: Push frontend image to ACR
+        shell: bash
         run: |
-          docker save "$ACR_LOGIN_SERVER/eduadmin-frontend:$GITHUB_SHA" \
-            -o "$RUNNER_TEMP/eduadmin-frontend-image.tar"
+          set -euo pipefail
+          ACR_NAME="${ACR_LOGIN_SERVER%%.*}"
+          az acr login --name "$ACR_NAME"
+          docker push "$ACR_LOGIN_SERVER/$IMAGE_NAME:$GITHUB_SHA"
 
-      - name: Upload frontend image bundle
-        uses: actions/upload-artifact@v4
-        with:
-          name: eduadmin-frontend-image
-          path: ${{ runner.temp }}/eduadmin-frontend-image.tar
-          if-no-files-found: error
-          retention-days: 1
-
-      - name: Cleanup frontend Docker context
+      - name: Cleanup
         if: always()
-        run: rm -rf docker-context/frontend
-
-  # 9. Push frontend image
-  frontend-image-push:
-    name: "09 - Push Frontend Image to ACR"
-    needs: frontend-image-build
-    runs-on: [self-hosted, Linux, X64]
-    timeout-minutes: 30
-
-    steps:
-      - name: Download frontend image bundle
-        uses: actions/download-artifact@v4
-        with:
-          name: eduadmin-frontend-image
-          path: ${{ runner.temp }}/frontend-image
-
-      - name: Azure login
-        uses: azure/login@v2
-        with:
-          creds: ${{ secrets.AZURE_CREDENTIALS }}
-
-      - name: Import and push frontend image
-        env:
-          ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
         run: |
-          set -e
-          docker load -i "$RUNNER_TEMP/frontend-image/eduadmin-frontend-image.tar"
-          az acr login --name "${ACR_LOGIN_SERVER%%.*}"
-          docker push "$ACR_LOGIN_SERVER/eduadmin-frontend:$GITHUB_SHA"
-          docker logout "$ACR_LOGIN_SERVER" || true
-          rm -rf "$RUNNER_TEMP/frontend-image"
-          rm -f "$RUNNER_TEMP/eduadmin-frontend-image.tar"
+          docker logout "${ACR_LOGIN_SERVER:-invalid}" || true
+          docker image rm \
+            "${ACR_LOGIN_SERVER:-invalid}/${IMAGE_NAME:-eduadmin-frontend}:${GITHUB_SHA}" \
+            || true
+          rm -rf docker-context/frontend
+          az logout || true

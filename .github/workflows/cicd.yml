@@ -22,7 +22,7 @@ jobs:
 
   # Stage 1: Build, Test and Analyze .NET API
   build-api:
-    name: Build and Analyze .NET API
+    name: Build, Test and Analyze .NET API
     runs-on: [self-hosted, Linux, X64]
 
     defaults:
@@ -35,7 +35,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
 
-      # 2. Install .NET SDK
+      # 2. Install .NET 8 SDK
       - name: Install .NET 8
         shell: bash
         run: |
@@ -51,11 +51,38 @@ jobs:
           echo "$RUNNER_TEMP/dotnet" >> "$GITHUB_PATH"
           echo "DOTNET_ROOT=$RUNNER_TEMP/dotnet" >> "$GITHUB_ENV"
 
-      # 3. Verify SDK
+      # 3. Verify .NET SDK
       - name: Verify .NET SDK
         run: dotnet --info
 
-      # 4. Install SonarScanner
+      # 4. Diagnose SonarQube connectivity
+      - name: Diagnose SonarQube Connection
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+        run: |
+          set -e
+
+          if [ -z "$SONAR_HOST_URL" ]; then
+            echo "ERROR: SONAR_HOST_URL secret is missing."
+            exit 1
+          fi
+
+          echo "Runner hostname: $(hostname)"
+          echo "Checking TCP port 9000..."
+
+          nc -vz -w 10 104.211.220.200 9000
+
+          echo "Checking SonarQube HTTP API..."
+
+          curl -fsS -v \
+            --connect-timeout 10 \
+            --max-time 30 \
+            "$SONAR_HOST_URL/api/system/status"
+
+          echo ""
+          echo "SonarQube connectivity check passed."
+
+      # 5. Install SonarScanner for .NET
       - name: Install SonarScanner for .NET
         run: |
           dotnet tool install --global dotnet-sonarscanner \
@@ -63,46 +90,47 @@ jobs:
 
           echo "$HOME/.dotnet/tools" >> "$GITHUB_PATH"
 
-      # 5. Check SonarQube connectivity
-      - name: Check SonarQube Server
-        env:
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-        run: |
-          curl -fsS \
-            --connect-timeout 5 \
-            --max-time 20 \
-            "$SONAR_HOST_URL/api/system/status"
+      # 6. Verify SonarScanner
+      - name: Verify SonarScanner
+        run: dotnet sonarscanner --version
 
-      # 6. Begin SonarQube analysis
+      # 7. Begin SonarQube analysis
       - name: Begin SonarQube Analysis
         env:
           SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_API }}
         run: |
+          set -e
+
+          if [ -z "$SONAR_TOKEN" ]; then
+            echo "ERROR: SONAR_TOKEN_API secret is missing."
+            exit 1
+          fi
+
           dotnet sonarscanner begin \
             /k:"EduAdmin" \
             /d:sonar.host.url="$SONAR_HOST_URL" \
             /d:sonar.token="$SONAR_TOKEN"
 
-      # 7. Restore dependencies
+      # 8. Restore dependencies
       - name: Restore dependencies
         run: dotnet restore StudentAPI.csproj
 
-      # 8. Build API
+      # 9. Build API
       - name: Build API
         run: |
           dotnet build StudentAPI.csproj \
             --configuration Release \
             --no-restore
 
-      # 9. Run tests
+      # 10. Run tests
       - name: Test API
         run: |
           dotnet test StudentAPI.csproj \
             --configuration Release \
             --no-build
 
-      # 10. End analysis and upload results
+      # 11. Complete analysis and upload results
       - name: End SonarQube Analysis
         if: success()
         env:

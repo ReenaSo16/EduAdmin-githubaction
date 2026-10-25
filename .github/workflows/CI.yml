@@ -346,7 +346,7 @@ jobs:
           test -n "$(find docker-context/frontend/dist -type f -print -quit)"
           cp student-app/Dockerfile docker-context/frontend/Dockerfile
 
-        - name: Copy Nginx configuration
+      - name: Copy Nginx configuration
         shell: bash
         run: |
           set -euo pipefail

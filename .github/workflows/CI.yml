@@ -10,8 +10,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: eduadmin-${{ github.ref }}
-  cancel-in-progress: true
+  group: eduadmin-${{ github.ref }}  #multiple workfolow 
+  cancel-in-progress: true  
 
 env:
   DOTNET_VERSION: '8.0'
@@ -36,7 +36,7 @@ jobs:
       - name: Install .NET SDK
         shell: bash
         run: |
-          set -e
+          set -e  
           mkdir -p "$RUNNER_TEMP/dotnet"
           curl -fsSL --retry 3 https://dot.net/v1/dotnet-install.sh \
             -o "$RUNNER_TEMP/dotnet-install.sh"

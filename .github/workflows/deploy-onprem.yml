@@ -138,6 +138,7 @@ jobs:
             /p:BlockOnPossibleDataLoss=True
           echo "DACPAC publish completed."
 
+  
   # --------------------------------------------------
   # JOB 2: Deploy API and frontend to Kubernetes
   # --------------------------------------------------
@@ -146,12 +147,18 @@ jobs:
     needs: deploy-database
     runs-on: [self-hosted, linux, x64]
 
+    env:
+      K8S_NAMESPACE: student
+
     steps:
       - name: Checkout selected commit
         uses: actions/checkout@v4
         with:
           ref: ${{ inputs.image_tag }}
 
+      # --------------------------------------------------
+      # Validate files, tools, and Kubernetes connectivity
+      # --------------------------------------------------
       - name: Validate tools and configuration
         shell: bash
         env:
@@ -166,23 +173,49 @@ jobs:
           fi
 
           test -n "$ACR_LOGIN_SERVER"
+
+          if [[ "$ACR_LOGIN_SERVER" != "reenaacr1.azurecr.io" ]]; then
+            echo "ERROR: Unexpected ACR login server."
+            exit 1
+          fi
+
           command -v kubectl
           command -v jq
 
-          test -s k8s/configmap.yaml
-          test -s k8s/studentapi-deployment.yaml
-          test -s k8s/studentapi-service.yaml
-          test -s k8s/studentapp-deployment.yaml
-          test -s k8s/studentapp-service.yaml
+          for file in \
+            k8s/configmap.yaml \
+            k8s/studentapi-deployment.yaml \
+            k8s/studentapi-service.yaml \
+            k8s/studentapp-deployment.yaml \
+            k8s/studentapp-service.yaml; do
+            if [[ ! -s "$file" ]]; then
+              echo "ERROR: Missing or empty file: $file"
+              exit 1
+            fi
+          done
 
-          # Prevent the previously observed ConfigMap mismatch.
-          grep -q 'name: eduadmin-config' k8s/configmap.yaml
-          grep -A 2 'configMapRef:' k8s/studentapi-deployment.yaml \
-            | grep -q 'name: eduadmin-config'
+          echo "Checking ConfigMap definition..."
+          grep -Eq '^[[:space:]]*name:[[:space:]]*eduadmin-config[[:space:]]*$' \
+            k8s/configmap.yaml
 
+          echo "Checking API ConfigMap reference..."
+          grep -Eq '^[[:space:]]*name:[[:space:]]*eduadmin-config[[:space:]]*$' \
+            k8s/studentapi-deployment.yaml
+
+          echo "Checking Kubernetes manifest syntax..."
+          kubectl apply --dry-run=client -f k8s/configmap.yaml
+          kubectl apply --dry-run=client -f k8s/studentapi-service.yaml
+          kubectl apply --dry-run=client -f k8s/studentapi-deployment.yaml
+          kubectl apply --dry-run=client -f k8s/studentapp-service.yaml
+          kubectl apply --dry-run=client -f k8s/studentapp-deployment.yaml
+
+          echo "Checking Kubernetes cluster connectivity..."
           kubectl version --client
           kubectl cluster-info
 
+      # --------------------------------------------------
+      # Ensure namespace exists
+      # --------------------------------------------------
       - name: Ensure namespace exists
         shell: bash
         run: |
@@ -191,6 +224,9 @@ jobs:
           kubectl create namespace "$K8S_NAMESPACE" \
             --dry-run=client -o yaml | kubectl apply -f -
 
+      # --------------------------------------------------
+      # Apply ConfigMap
+      # --------------------------------------------------
       - name: Create or update ConfigMap
         shell: bash
         run: |
@@ -198,6 +234,9 @@ jobs:
 
           kubectl apply -f k8s/configmap.yaml
 
+      # --------------------------------------------------
+      # Create/update application database connection Secret
+      # --------------------------------------------------
       - name: Create or update database Secret
         shell: bash
         env:
@@ -206,10 +245,10 @@ jobs:
           set -euo pipefail
           set +x
 
-          test -n "$STUDENT_DB_CONNECTION" || {
+          if [[ -z "$STUDENT_DB_CONNECTION" ]]; then
             echo "ERROR: STUDENT_DB_CONNECTION is missing."
             exit 1
-          }
+          fi
 
           kubectl create secret generic student-db-secret \
             --namespace "$K8S_NAMESPACE" \
@@ -218,6 +257,9 @@ jobs:
 
           echo "Database Secret created/updated."
 
+      # --------------------------------------------------
+      # Create/update ACR pull Secret
+      # --------------------------------------------------
       - name: Create or update ACR pull Secret
         shell: bash
         env:
@@ -226,27 +268,15 @@ jobs:
         run: |
           set -euo pipefail
           set +x
+          umask 077
 
-          test -n "$AZURE_CREDENTIALS" || {
-            echo "ERROR: AZURE_CREDENTIALS is missing."
-            exit 1
-          }
-
-          test -n "$ACR_LOGIN_SERVER" || {
-            echo "ERROR: ACR_LOGIN_SERVER is missing."
-            exit 1
-          }
-
-          if [[ "$ACR_LOGIN_SERVER" != "reenaacr1.azurecr.io" ]]; then
-            echo "ERROR: Unexpected ACR login server."
+          if [[ -z "$AZURE_CREDENTIALS" || -z "$ACR_LOGIN_SERVER" ]]; then
+            echo "ERROR: Required ACR credentials are missing."
             exit 1
           fi
 
           CLIENT_ID=$(printf '%s' "$AZURE_CREDENTIALS" | jq -er '.clientId')
           CLIENT_SECRET=$(printf '%s' "$AZURE_CREDENTIALS" | jq -er '.clientSecret')
-
-          test -n "$CLIENT_ID"
-          test -n "$CLIENT_SECRET"
 
           kubectl create secret docker-registry acr-pull-secret \
             --namespace "$K8S_NAMESPACE" \
@@ -255,10 +285,13 @@ jobs:
             --docker-password="$CLIENT_SECRET" \
             --dry-run=client -o yaml | kubectl apply -f -
 
-          unset CLIENT_SECRET AZURE_CREDENTIALS
+          unset CLIENT_ID CLIENT_SECRET AZURE_CREDENTIALS
 
           echo "ACR pull Secret created/updated."
 
+      # --------------------------------------------------
+      # Apply services and deployments
+      # --------------------------------------------------
       - name: Apply Kubernetes Services and Deployments
         shell: bash
         run: |
@@ -269,6 +302,9 @@ jobs:
           kubectl apply -f k8s/studentapp-service.yaml
           kubectl apply -f k8s/studentapp-deployment.yaml
 
+      # --------------------------------------------------
+      # Use immutable SHA-tagged images
+      # --------------------------------------------------
       - name: Set exact SHA-tagged images
         shell: bash
         env:
@@ -285,6 +321,9 @@ jobs:
             studentapp="$ACR_LOGIN_SERVER/eduadmin-frontend:$IMAGE_TAG" \
             --namespace "$K8S_NAMESPACE"
 
+      # --------------------------------------------------
+      # Ensure pods can authenticate to ACR
+      # --------------------------------------------------
       - name: Configure imagePullSecrets
         shell: bash
         run: |
@@ -300,6 +339,9 @@ jobs:
             --type=merge \
             -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"acr-pull-secret"}]}}}}'
 
+      # --------------------------------------------------
+      # Wait for Kubernetes rollouts
+      # --------------------------------------------------
       - name: Wait for rollouts
         shell: bash
         run: |
@@ -313,6 +355,9 @@ jobs:
             --namespace "$K8S_NAMESPACE" \
             --timeout=300s
 
+      # --------------------------------------------------
+      # Verify deployed images and resources
+      # --------------------------------------------------
       - name: Verify deployed resources
         shell: bash
         env:
@@ -322,11 +367,11 @@ jobs:
           set -euo pipefail
 
           API_IMAGE=$(kubectl get deployment studentapi \
-            -n "$K8S_NAMESPACE" \
+            --namespace "$K8S_NAMESPACE" \
             -o jsonpath='{.spec.template.spec.containers[?(@.name=="studentapi")].image}')
 
           FRONTEND_IMAGE=$(kubectl get deployment studentapp \
-            -n "$K8S_NAMESPACE" \
+            --namespace "$K8S_NAMESPACE" \
             -o jsonpath='{.spec.template.spec.containers[?(@.name=="studentapp")].image}')
 
           test "$API_IMAGE" = "$ACR_LOGIN_SERVER/eduadmin-api:$IMAGE_TAG"
@@ -343,13 +388,21 @@ jobs:
           echo "Verified API image: $API_IMAGE"
           echo "Verified frontend image: $FRONTEND_IMAGE"
 
+      # --------------------------------------------------
+      # Diagnostics if deployment fails
+      # --------------------------------------------------
       - name: Diagnostics on deployment failure
         if: ${{ failure() }}
         shell: bash
         run: |
-          kubectl get deployments,pods,services -n "$K8S_NAMESPACE" -o wide || true
+          kubectl get deployments,pods,services \
+            -n "$K8S_NAMESPACE" -o wide || true
+
           kubectl get events -n "$K8S_NAMESPACE" \
             --sort-by=.lastTimestamp | tail -n 40 || true
-          kubectl describe deployment studentapi -n "$K8S_NAMESPACE" || true
-          kubectl logs deployment/studentapi -n "$K8S_NAMESPACE" \
-            --all-pods=true --tail=100 || true
+
+          kubectl describe deployment studentapi \
+            -n "$K8S_NAMESPACE" || true
+
+          kubectl logs deployment/studentapi \
+            -n "$K8S_NAMESPACE" --all-pods=true --tail=100 || true

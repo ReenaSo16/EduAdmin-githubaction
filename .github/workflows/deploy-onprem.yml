@@ -24,15 +24,14 @@ jobs:
   # --------------------------------------------------
   # JOB 1: Deploy database DACPAC
   # --------------------------------------------------
+ 
   deploy-database:
     name: Deploy StudentDB DACPAC
     runs-on: [self-hosted, linux, x64]
 
     steps:
-      - name: Checkout selected commit
+      - name: Checkout repository
         uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.image_tag }}
 
       - name: Validate input and DACPAC
         shell: bash
@@ -40,82 +39,68 @@ jobs:
           IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
-
           if [[ ! "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
             echo "ERROR: Enter a full 40-character lowercase commit SHA."
             exit 1
           fi
-
           test -s Database/StudentDB.dacpac
           echo "DACPAC file found."
 
-      - name: Install .NET SDK
-        uses: actions/setup-dotnet@v4
-        with:
-          dotnet-version: "8.0.x"
+      - name: Install .NET SDK locally
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$HOME/.dotnet"
+          curl -fsSL https://dot.net/v1/dotnet-install.sh \
+            -o "$RUNNER_TEMP/dotnet-install.sh"
+
+          bash "$RUNNER_TEMP/dotnet-install.sh" \
+            --channel 8.0 \
+            --install-dir "$HOME/.dotnet"
+
+          echo "$HOME/.dotnet" >> "$GITHUB_PATH"
+          echo "DOTNET_ROOT=$HOME/.dotnet" >> "$GITHUB_ENV"
+          "$HOME/.dotnet/dotnet" --info
 
       - name: Install SqlPackage
         shell: bash
         run: |
           set -euo pipefail
-
           mkdir -p "$RUNNER_TEMP/sqlpackage"
 
           dotnet tool install \
             --tool-path "$RUNNER_TEMP/sqlpackage" \
             Microsoft.SqlPackage
 
+          echo "$RUNNER_TEMP/sqlpackage" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/sqlpackage/sqlpackage" /Version
 
-      - name: Validate SQL deployment credentials
+      - name: Validate SQL credentials
         shell: bash
         env:
           SQLSERVER_USERNAME: ${{ secrets.SQLSERVER_USERNAME }}
           SQLSERVER_PASSWORD: ${{ secrets.SQLSERVER_SA_PASSWORD }}
         run: |
           set -euo pipefail
+          test -n "$SQLSERVER_USERNAME"
+          test -n "$SQLSERVER_PASSWORD"
+          echo "SQL credentials are configured."
 
-          test -n "$SQLSERVER_USERNAME" || {
-            echo "ERROR: SQLSERVER_USERNAME is missing."
-            exit 1
-          }
-
-          test -n "$SQLSERVER_PASSWORD" || {
-            echo "ERROR: SQLSERVER_SA_PASSWORD is missing."
-            exit 1
-          }
-
-          echo "SQL deployment credentials are configured."
-
-      - name: Check SQL Server network connectivity
+      - name: Check SQL Server connectivity
         shell: bash
-        env:
-          SQLSERVER_HOST: ${{ secrets.SQLSERVER_HOST }}
         run: |
           set -euo pipefail
-
-          SQL_HOST="${SQLSERVER_HOST:-10.193.182.70}"
-
-          echo "Checking SQL Server TCP connectivity..."
-
-          timeout 10 bash -c \
-            "</dev/tcp/${SQL_HOST}/1433"
-
+          timeout 5 bash -c '</dev/tcp/192.168.1.124/1433'
           echo "SQL Server TCP connectivity successful."
 
       - name: Generate DACPAC deployment report
         shell: bash
         env:
-          SQLSERVER_HOST: ${{ secrets.SQLSERVER_HOST }}
           SQLSERVER_USERNAME: ${{ secrets.SQLSERVER_USERNAME }}
           SQLSERVER_PASSWORD: ${{ secrets.SQLSERVER_SA_PASSWORD }}
         run: |
           set -euo pipefail
           set +x
-
-          SQL_HOST="${SQLSERVER_HOST:-10.193.182.70}"
-          SQL_SERVER="${SQL_HOST},1433"
-
           "$RUNNER_TEMP/sqlpackage/sqlpackage" \
             /Action:DeployReport \
             /SourceFile:"Database/StudentDB.dacpac" \
@@ -126,23 +111,17 @@ jobs:
             /TargetEncryptConnection:True \
             /TargetTrustServerCertificate:True \
             /OutputPath:"$RUNNER_TEMP/StudentDB-deploy-report.xml"
-
-          echo "Deployment report generated in temporary storage."
+          echo "Deployment report generated."
           echo "Review the report and back up StudentDB before publishing."
 
-      - name: Publish DACPAC to StudentDB
+      - name: Publish DACPAC
         shell: bash
         env:
-          SQLSERVER_HOST: ${{ secrets.SQLSERVER_HOST }}
           SQLSERVER_USERNAME: ${{ secrets.SQLSERVER_USERNAME }}
           SQLSERVER_PASSWORD: ${{ secrets.SQLSERVER_SA_PASSWORD }}
         run: |
           set -euo pipefail
           set +x
-
-          SQL_HOST="${SQLSERVER_HOST:-10.193.182.70}"
-          SQL_SERVER="${SQL_HOST},1433"
-
           "$RUNNER_TEMP/sqlpackage/sqlpackage" \
             /Action:Publish \
             /SourceFile:"Database/StudentDB.dacpac" \
@@ -153,8 +132,7 @@ jobs:
             /TargetEncryptConnection:True \
             /TargetTrustServerCertificate:True \
             /p:BlockOnPossibleDataLoss=True
-
-          echo "StudentDB DACPAC publish completed."
+          echo "DACPAC publish completed."
 
   # --------------------------------------------------
   # JOB 2: Deploy API and frontend to Kubernetes

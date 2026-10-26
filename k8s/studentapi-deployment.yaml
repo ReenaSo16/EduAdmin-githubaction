@@ -21,15 +21,18 @@ spec:
           ports:
             - name: http
               containerPort: 5000
+
           envFrom:
             - configMapRef:
                 name: eduadmin-config
+
           env:
             - name: ConnectionStrings__DefaultConnection
               valueFrom:
                 secretKeyRef:
-                  name: student-db-secret
+                  name: eduadmin-db-secret
                   key: ConnectionStrings__DefaultConnection
+
           resources:
             requests:
               cpu: 100m
@@ -37,11 +40,13 @@ spec:
             limits:
               cpu: 500m
               memory: 512Mi
+
           readinessProbe:
             tcpSocket:
               port: 5000
             initialDelaySeconds: 15
             periodSeconds: 10
+
           livenessProbe:
             tcpSocket:
               port: 5000

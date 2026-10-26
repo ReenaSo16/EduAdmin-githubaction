@@ -139,6 +139,7 @@ jobs:
           echo "DACPAC publish completed."
 
   
+ 
   # --------------------------------------------------
   # JOB 2: Deploy API and frontend to Kubernetes
   # --------------------------------------------------
@@ -151,16 +152,14 @@ jobs:
       K8S_NAMESPACE: student
 
     steps:
-      # --------------------------------------------------
-      # Checkout the selected commit
-      # --------------------------------------------------
-      - name: Checkout selected commit
+      # Get the latest Kubernetes manifests from main
+      - name: Checkout deployment manifests
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.image_tag }}
+          ref: main
 
       # --------------------------------------------------
-      # Validate tools, files, and configuration
+      # Validate files, tools, and cluster access
       # --------------------------------------------------
       - name: Validate tools and configuration
         shell: bash
@@ -171,17 +170,12 @@ jobs:
           set -euo pipefail
 
           if [[ ! "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "ERROR: Invalid commit SHA. Use a full 40-character lowercase SHA."
-            exit 1
-          fi
-
-          if [[ -z "$ACR_LOGIN_SERVER" ]]; then
-            echo "ERROR: ACR_LOGIN_SERVER is missing."
+            echo "ERROR: image_tag must be a full 40-character lowercase SHA."
             exit 1
           fi
 
           if [[ "$ACR_LOGIN_SERVER" != "reenaacr1.azurecr.io" ]]; then
-            echo "ERROR: Unexpected ACR login server."
+            echo "ERROR: ACR_LOGIN_SERVER is missing or incorrect."
             exit 1
           fi
 
@@ -200,36 +194,31 @@ jobs:
             fi
           done
 
-          echo "Checking ConfigMap definition..."
-          if ! grep -Eq '^[[:space:]]*name:[[:space:]]*eduadmin-config[[:space:]]*$' \
-            k8s/configmap.yaml; then
-            echo "ERROR: eduadmin-config not found in k8s/configmap.yaml"
-            exit 1
-          fi
+          grep -Eq '^[[:space:]]*name:[[:space:]]*eduadmin-config[[:space:]]*$' \
+            k8s/configmap.yaml || {
+              echo "ERROR: eduadmin-config missing from configmap.yaml"
+              exit 1
+            }
 
-          echo "Checking API ConfigMap reference..."
-          if ! grep -q 'configMapRef:' k8s/studentapi-deployment.yaml; then
-            echo "ERROR: configMapRef is missing from studentapi-deployment.yaml"
-            exit 1
-          fi
+          grep -A 8 'configMapRef:' k8s/studentapi-deployment.yaml \
+            | grep -Eq 'name:[[:space:]]*eduadmin-config' || {
+              echo "ERROR: API ConfigMap reference is incorrect"
+              exit 1
+            }
 
-          if ! grep -q 'name: eduadmin-config' k8s/studentapi-deployment.yaml; then
-            echo "ERROR: eduadmin-config reference is missing from studentapi-deployment.yaml"
-            exit 1
-          fi
+          grep -A 8 'secretKeyRef:' k8s/studentapi-deployment.yaml \
+            | grep -Eq 'name:[[:space:]]*eduadmin-db-secret' || {
+              echo "ERROR: API must reference eduadmin-db-secret"
+              exit 1
+            }
 
-          echo "ConfigMap validation passed."
+          kubectl cluster-info
 
-          echo "Checking Kubernetes manifest syntax..."
           kubectl apply --dry-run=client -f k8s/configmap.yaml
           kubectl apply --dry-run=client -f k8s/studentapi-service.yaml
           kubectl apply --dry-run=client -f k8s/studentapi-deployment.yaml
           kubectl apply --dry-run=client -f k8s/studentapp-service.yaml
           kubectl apply --dry-run=client -f k8s/studentapp-deployment.yaml
-
-          echo "Checking Kubernetes cluster connectivity..."
-          kubectl version --client
-          kubectl cluster-info
 
       # --------------------------------------------------
       # Ensure namespace exists
@@ -243,17 +232,16 @@ jobs:
             --dry-run=client -o yaml | kubectl apply -f -
 
       # --------------------------------------------------
-      # Create or update ConfigMap
+      # Apply ConfigMap
       # --------------------------------------------------
-      - name: Create or update ConfigMap
+      - name: Apply ConfigMap
         shell: bash
         run: |
           set -euo pipefail
-
           kubectl apply -f k8s/configmap.yaml
 
       # --------------------------------------------------
-      # Create or update database connection Secret
+      # Create/update Kubernetes Secret from GitHub Secret
       # --------------------------------------------------
       - name: Create or update database Secret
         shell: bash
@@ -262,21 +250,22 @@ jobs:
         run: |
           set -euo pipefail
           set +x
+          umask 077
 
           if [[ -z "$STUDENT_DB_CONNECTION" ]]; then
-            echo "ERROR: STUDENT_DB_CONNECTION is missing."
+            echo "ERROR: GitHub Secret STUDENT_DB_CONNECTION is missing."
             exit 1
           fi
 
-          kubectl create secret generic student-db-secret \
+          kubectl create secret generic eduadmin-db-secret \
             --namespace "$K8S_NAMESPACE" \
             --from-literal="ConnectionStrings__DefaultConnection=$STUDENT_DB_CONNECTION" \
             --dry-run=client -o yaml | kubectl apply -f -
 
-          echo "Database Secret created/updated."
+          echo "Kubernetes database Secret created/updated."
 
       # --------------------------------------------------
-      # Create or update ACR pull Secret
+      # Create/update ACR pull Secret
       # --------------------------------------------------
       - name: Create or update ACR pull Secret
         shell: bash
@@ -289,7 +278,7 @@ jobs:
           umask 077
 
           if [[ -z "$AZURE_CREDENTIALS" || -z "$ACR_LOGIN_SERVER" ]]; then
-            echo "ERROR: Required ACR credentials are missing."
+            echo "ERROR: ACR credentials are missing."
             exit 1
           fi
 
@@ -321,7 +310,7 @@ jobs:
           kubectl apply -f k8s/studentapp-deployment.yaml
 
       # --------------------------------------------------
-      # Set immutable SHA-tagged images
+      # Set exact SHA-tagged images built by CI
       # --------------------------------------------------
       - name: Set exact SHA-tagged images
         shell: bash
@@ -340,7 +329,7 @@ jobs:
             --namespace "$K8S_NAMESPACE"
 
       # --------------------------------------------------
-      # Configure ACR authentication for pods
+      # Configure imagePullSecrets
       # --------------------------------------------------
       - name: Configure imagePullSecrets
         shell: bash
@@ -366,12 +355,10 @@ jobs:
           set -euo pipefail
 
           kubectl rollout status deployment/studentapi \
-            --namespace "$K8S_NAMESPACE" \
-            --timeout=300s
+            --namespace "$K8S_NAMESPACE" --timeout=300s
 
           kubectl rollout status deployment/studentapp \
-            --namespace "$K8S_NAMESPACE" \
-            --timeout=300s
+            --namespace "$K8S_NAMESPACE" --timeout=300s
 
       # --------------------------------------------------
       # Verify deployed resources
@@ -385,37 +372,38 @@ jobs:
           set -euo pipefail
 
           API_IMAGE=$(kubectl get deployment studentapi \
-            --namespace "$K8S_NAMESPACE" \
+            -n "$K8S_NAMESPACE" \
             -o jsonpath='{.spec.template.spec.containers[?(@.name=="studentapi")].image}')
 
           FRONTEND_IMAGE=$(kubectl get deployment studentapp \
-            --namespace "$K8S_NAMESPACE" \
+            -n "$K8S_NAMESPACE" \
             -o jsonpath='{.spec.template.spec.containers[?(@.name=="studentapp")].image}')
 
           EXPECTED_API_IMAGE="$ACR_LOGIN_SERVER/eduadmin-api:$IMAGE_TAG"
           EXPECTED_FRONTEND_IMAGE="$ACR_LOGIN_SERVER/eduadmin-frontend:$IMAGE_TAG"
 
-          if [[ "$API_IMAGE" != "$EXPECTED_API_IMAGE" ]]; then
-            echo "ERROR: API image does not match the selected SHA."
+          [[ "$API_IMAGE" == "$EXPECTED_API_IMAGE" ]] || {
+            echo "ERROR: API image does not match selected SHA."
             exit 1
-          fi
+          }
 
-          if [[ "$FRONTEND_IMAGE" != "$EXPECTED_FRONTEND_IMAGE" ]]; then
-            echo "ERROR: Frontend image does not match the selected SHA."
+          [[ "$FRONTEND_IMAGE" == "$EXPECTED_FRONTEND_IMAGE" ]] || {
+            echo "ERROR: Frontend image does not match selected SHA."
             exit 1
-          fi
+          }
 
           kubectl get configmap eduadmin-config -n "$K8S_NAMESPACE"
-          kubectl get secret student-db-secret acr-pull-secret -n "$K8S_NAMESPACE"
-          kubectl get deployments -n "$K8S_NAMESPACE" -o wide
-          kubectl get pods -n "$K8S_NAMESPACE" -o wide
-          kubectl get services -n "$K8S_NAMESPACE"
+          kubectl get secret eduadmin-db-secret acr-pull-secret \
+            -n "$K8S_NAMESPACE"
+          kubectl get deployments,pods,services \
+            -n "$K8S_NAMESPACE" -o wide
+
           kubectl get events -n "$K8S_NAMESPACE" \
             --sort-by=.lastTimestamp | tail -n 20
 
           echo "Verified API image: $API_IMAGE"
           echo "Verified frontend image: $FRONTEND_IMAGE"
-          echo "Kubernetes deployment verification successful."
+          echo "Deployment verification successful."
 
       # --------------------------------------------------
       # Diagnostics on failure
@@ -424,8 +412,6 @@ jobs:
         if: ${{ failure() }}
         shell: bash
         run: |
-          echo "Collecting Kubernetes diagnostics..."
-
           kubectl get deployments,pods,services \
             -n "$K8S_NAMESPACE" -o wide || true
 

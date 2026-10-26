@@ -19,6 +19,8 @@ concurrency:
 env:
   K8S_NAMESPACE: student
   SQL_DATABASE: StudentDB
+  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
+  SQL_SERVER: "10.193.182.70,1433"
 
 jobs:
   # --------------------------------------------------
@@ -98,6 +100,8 @@ jobs:
         env:
           SQLSERVER_USERNAME: ${{ secrets.SQLSERVER_USERNAME }}
           SQLSERVER_PASSWORD: ${{ secrets.SQLSERVER_SA_PASSWORD }}
+          SQL_SERVER: "10.193.182.70,1433"
+          SQL_DATABASE: StudentDB
         run: |
           set -euo pipefail
           set +x

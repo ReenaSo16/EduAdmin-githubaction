@@ -1,13 +1,17 @@
 name: EduAdmin CI-CD
 
+
 on:
-  push:
-    branches:
-     - main
-workflow_dispatch:
+  workflow_dispatch:
+    inputs:
+      image_tag:
+        description: "Full 40-character SHA from a successful CI run"
+        required: true
+        type: string
 
 permissions:
   contents: read
+
 
 concurrency:
   group: eduadmin-${{ github.ref }}  #multiple workfolow 

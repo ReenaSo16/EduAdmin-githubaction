@@ -129,7 +129,7 @@ jobs:
           SONAR_TOKEN: ${{ secrets.SONAR_TOKEN_API }}
         run: dotnet-sonarscanner end /d:sonar.token="$SONAR_TOKEN"
 
-      - name: Cleanup scanner and SDK
+      - name: Cleanup scanner and SDK 
         if: always()
         run: |
           rm -rf "$RUNNER_TEMP/dotnet"

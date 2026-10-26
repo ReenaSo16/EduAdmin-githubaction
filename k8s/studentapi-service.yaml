@@ -17,16 +17,18 @@
 #   type: ClusterIP
 
 
+
 apiVersion: v1
 kind: Service
 metadata:
   name: studentapi-service
   namespace: student
 spec:
-  type: ClusterIP
+  type: NodePort
   selector:
     app: studentapi
   ports:
     - name: http
       port: 5000
       targetPort: 5000
+      nodePort: 30081

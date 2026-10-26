@@ -141,7 +141,7 @@ jobs:
   
  
   # --------------------------------------------------
-  # JOB 2: Deploy API and frontend to Kubernetes
+  # JOB 2: Deploy API and frontend to Kubernetes 
   # --------------------------------------------------
   deploy-kubernetes:
     name: Deploy API and Frontend

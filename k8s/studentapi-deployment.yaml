@@ -23,7 +23,7 @@ spec:
               containerPort: 5000
           envFrom:
             - configMapRef:
-                name: student-config
+               name: eduadmin-config
           env:
             - name: ConnectionStrings__DefaultConnection
               valueFrom:

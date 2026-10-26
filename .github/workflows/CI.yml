@@ -1,21 +1,14 @@
 name: EduAdmin CI-CD
 
 on:
-  push:
-    branches:
-      - main
   workflow_dispatch:
 
 permissions:
   contents: read
 
-permissions:
-  contents: read
-
-
 concurrency:
-  group: eduadmin-${{ github.ref }}  #multiple workfolow 
-  cancel-in-progress: true  
+  group: eduadmin-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   DOTNET_VERSION: '8.0'

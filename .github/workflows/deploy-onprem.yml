@@ -18,18 +18,21 @@ concurrency:
 
 env:
   K8S_NAMESPACE: student
-  ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-  SQL_SERVER: "192.168.1.124,1433"
   SQL_DATABASE: StudentDB
 
 jobs:
+  # --------------------------------------------------
+  # JOB 1: Deploy database DACPAC
+  # --------------------------------------------------
   deploy-database:
     name: Deploy StudentDB DACPAC
     runs-on: [self-hosted, linux, x64]
 
     steps:
-      - name: Checkout repository
+      - name: Checkout selected commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.image_tag }}
 
       - name: Validate input and DACPAC
         shell: bash
@@ -46,66 +49,72 @@ jobs:
           test -s Database/StudentDB.dacpac
           echo "DACPAC file found."
 
-      - name: Install .NET SDK locally
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          mkdir -p "$HOME/.dotnet"
-
-          curl -fsSL https://dot.net/v1/dotnet-install.sh \
-            -o "$RUNNER_TEMP/dotnet-install.sh"
-
-          bash "$RUNNER_TEMP/dotnet-install.sh" \
-            --channel 8.0 \
-            --install-dir "$HOME/.dotnet"
-
-          echo "$HOME/.dotnet" >> "$GITHUB_PATH"
-          echo "DOTNET_ROOT=$HOME/.dotnet" >> "$GITHUB_ENV"
-
-          "$HOME/.dotnet/dotnet" --info
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
 
       - name: Install SqlPackage
         shell: bash
         run: |
           set -euo pipefail
 
+          mkdir -p "$RUNNER_TEMP/sqlpackage"
+
           dotnet tool install \
             --tool-path "$RUNNER_TEMP/sqlpackage" \
             Microsoft.SqlPackage
 
-          echo "$RUNNER_TEMP/sqlpackage" >> "$GITHUB_PATH"
           "$RUNNER_TEMP/sqlpackage/sqlpackage" /Version
 
-      - name: Validate SQL credentials
+      - name: Validate SQL deployment credentials
         shell: bash
         env:
           SQLSERVER_USERNAME: ${{ secrets.SQLSERVER_USERNAME }}
           SQLSERVER_PASSWORD: ${{ secrets.SQLSERVER_SA_PASSWORD }}
         run: |
           set -euo pipefail
-          test -n "$SQLSERVER_USERNAME"
-          test -n "$SQLSERVER_PASSWORD"
-          echo "SQL credentials are configured."
 
-      - name: Check SQL Server connectivity
+          test -n "$SQLSERVER_USERNAME" || {
+            echo "ERROR: SQLSERVER_USERNAME is missing."
+            exit 1
+          }
+
+          test -n "$SQLSERVER_PASSWORD" || {
+            echo "ERROR: SQLSERVER_SA_PASSWORD is missing."
+            exit 1
+          }
+
+          echo "SQL deployment credentials are configured."
+
+      - name: Check SQL Server network connectivity
         shell: bash
+        env:
+          SQLSERVER_HOST: ${{ secrets.SQLSERVER_HOST }}
         run: |
           set -euo pipefail
 
-          timeout 5 bash -c \
-            '</dev/tcp/192.168.1.124/1433'
+          SQL_HOST="${SQLSERVER_HOST:-10.193.182.70}"
+
+          echo "Checking SQL Server TCP connectivity..."
+
+          timeout 10 bash -c \
+            "</dev/tcp/${SQL_HOST}/1433"
 
           echo "SQL Server TCP connectivity successful."
 
       - name: Generate DACPAC deployment report
         shell: bash
         env:
+          SQLSERVER_HOST: ${{ secrets.SQLSERVER_HOST }}
           SQLSERVER_USERNAME: ${{ secrets.SQLSERVER_USERNAME }}
           SQLSERVER_PASSWORD: ${{ secrets.SQLSERVER_SA_PASSWORD }}
         run: |
           set -euo pipefail
           set +x
+
+          SQL_HOST="${SQLSERVER_HOST:-10.193.182.70}"
+          SQL_SERVER="${SQL_HOST},1433"
 
           "$RUNNER_TEMP/sqlpackage/sqlpackage" \
             /Action:DeployReport \
@@ -118,17 +127,21 @@ jobs:
             /TargetTrustServerCertificate:True \
             /OutputPath:"$RUNNER_TEMP/StudentDB-deploy-report.xml"
 
-          echo "Deployment report generated."
+          echo "Deployment report generated in temporary storage."
           echo "Review the report and back up StudentDB before publishing."
 
-      - name: Publish DACPAC
+      - name: Publish DACPAC to StudentDB
         shell: bash
         env:
+          SQLSERVER_HOST: ${{ secrets.SQLSERVER_HOST }}
           SQLSERVER_USERNAME: ${{ secrets.SQLSERVER_USERNAME }}
           SQLSERVER_PASSWORD: ${{ secrets.SQLSERVER_SA_PASSWORD }}
         run: |
           set -euo pipefail
           set +x
+
+          SQL_HOST="${SQLSERVER_HOST:-10.193.182.70}"
+          SQL_SERVER="${SQL_HOST},1433"
 
           "$RUNNER_TEMP/sqlpackage/sqlpackage" \
             /Action:Publish \
@@ -141,18 +154,23 @@ jobs:
             /TargetTrustServerCertificate:True \
             /p:BlockOnPossibleDataLoss=True
 
-          echo "DACPAC publish completed."
+          echo "StudentDB DACPAC publish completed."
 
+  # --------------------------------------------------
+  # JOB 2: Deploy API and frontend to Kubernetes
+  # --------------------------------------------------
   deploy-kubernetes:
     name: Deploy API and Frontend
     needs: deploy-database
     runs-on: [self-hosted, linux, x64]
 
     steps:
-      - name: Checkout repository
+      - name: Checkout selected commit
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.image_tag }}
 
-      - name: Validate tools and SHA
+      - name: Validate tools and configuration
         shell: bash
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
@@ -160,14 +178,26 @@ jobs:
         run: |
           set -euo pipefail
 
-          [[ "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]] || {
+          if [[ ! "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
             echo "ERROR: Invalid commit SHA."
             exit 1
-          }
+          fi
 
           test -n "$ACR_LOGIN_SERVER"
           command -v kubectl
           command -v jq
+
+          test -s k8s/configmap.yaml
+          test -s k8s/studentapi-deployment.yaml
+          test -s k8s/studentapi-service.yaml
+          test -s k8s/studentapp-deployment.yaml
+          test -s k8s/studentapp-service.yaml
+
+          # Prevent the previously observed ConfigMap mismatch.
+          grep -q 'name: eduadmin-config' k8s/configmap.yaml
+          grep -A 2 'configMapRef:' k8s/studentapi-deployment.yaml \
+            | grep -q 'name: eduadmin-config'
+
           kubectl version --client
           kubectl cluster-info
 
@@ -179,10 +209,11 @@ jobs:
           kubectl create namespace "$K8S_NAMESPACE" \
             --dry-run=client -o yaml | kubectl apply -f -
 
-      - name: Apply ConfigMap
+      - name: Create or update ConfigMap
         shell: bash
         run: |
           set -euo pipefail
+
           kubectl apply -f k8s/configmap.yaml
 
       - name: Create or update database Secret
@@ -194,7 +225,7 @@ jobs:
           set +x
 
           test -n "$STUDENT_DB_CONNECTION" || {
-            echo "ERROR: STUDENT_DB_CONNECTION secret is missing."
+            echo "ERROR: STUDENT_DB_CONNECTION is missing."
             exit 1
           }
 
@@ -202,6 +233,8 @@ jobs:
             --namespace "$K8S_NAMESPACE" \
             --from-literal="ConnectionStrings__DefaultConnection=$STUDENT_DB_CONNECTION" \
             --dry-run=client -o yaml | kubectl apply -f -
+
+          echo "Database Secret created/updated."
 
       - name: Create or update ACR pull Secret
         shell: bash
@@ -212,12 +245,26 @@ jobs:
           set -euo pipefail
           set +x
 
+          test -n "$AZURE_CREDENTIALS" || {
+            echo "ERROR: AZURE_CREDENTIALS is missing."
+            exit 1
+          }
+
+          test -n "$ACR_LOGIN_SERVER" || {
+            echo "ERROR: ACR_LOGIN_SERVER is missing."
+            exit 1
+          }
+
+          if [[ "$ACR_LOGIN_SERVER" != "reenaacr1.azurecr.io" ]]; then
+            echo "ERROR: Unexpected ACR login server."
+            exit 1
+          fi
+
           CLIENT_ID=$(printf '%s' "$AZURE_CREDENTIALS" | jq -er '.clientId')
           CLIENT_SECRET=$(printf '%s' "$AZURE_CREDENTIALS" | jq -er '.clientSecret')
 
           test -n "$CLIENT_ID"
           test -n "$CLIENT_SECRET"
-          test -n "$ACR_LOGIN_SERVER"
 
           kubectl create secret docker-registry acr-pull-secret \
             --namespace "$K8S_NAMESPACE" \
@@ -228,7 +275,9 @@ jobs:
 
           unset CLIENT_SECRET AZURE_CREDENTIALS
 
-      - name: Apply Kubernetes manifests
+          echo "ACR pull Secret created/updated."
+
+      - name: Apply Kubernetes Services and Deployments
         shell: bash
         run: |
           set -euo pipefail
@@ -238,7 +287,7 @@ jobs:
           kubectl apply -f k8s/studentapp-service.yaml
           kubectl apply -f k8s/studentapp-deployment.yaml
 
-      - name: Set API and frontend images
+      - name: Set exact SHA-tagged images
         shell: bash
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
@@ -248,11 +297,11 @@ jobs:
 
           kubectl set image deployment/studentapi \
             studentapi="$ACR_LOGIN_SERVER/eduadmin-api:$IMAGE_TAG" \
-            -n "$K8S_NAMESPACE"
+            --namespace "$K8S_NAMESPACE"
 
           kubectl set image deployment/studentapp \
             studentapp="$ACR_LOGIN_SERVER/eduadmin-frontend:$IMAGE_TAG" \
-            -n "$K8S_NAMESPACE"
+            --namespace "$K8S_NAMESPACE"
 
       - name: Configure imagePullSecrets
         shell: bash
@@ -260,27 +309,29 @@ jobs:
           set -euo pipefail
 
           kubectl patch deployment studentapi \
-            -n "$K8S_NAMESPACE" \
+            --namespace "$K8S_NAMESPACE" \
             --type=merge \
             -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"acr-pull-secret"}]}}}}'
 
           kubectl patch deployment studentapp \
-            -n "$K8S_NAMESPACE" \
+            --namespace "$K8S_NAMESPACE" \
             --type=merge \
             -p '{"spec":{"template":{"spec":{"imagePullSecrets":[{"name":"acr-pull-secret"}]}}}}'
 
-      - name: Wait for rollout
+      - name: Wait for rollouts
         shell: bash
         run: |
           set -euo pipefail
 
           kubectl rollout status deployment/studentapi \
-            -n "$K8S_NAMESPACE" --timeout=300s
+            --namespace "$K8S_NAMESPACE" \
+            --timeout=300s
 
           kubectl rollout status deployment/studentapp \
-            -n "$K8S_NAMESPACE" --timeout=300s
+            --namespace "$K8S_NAMESPACE" \
+            --timeout=300s
 
-      - name: Verify deployment
+      - name: Verify deployed resources
         shell: bash
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
@@ -300,12 +351,23 @@ jobs:
           test "$FRONTEND_IMAGE" = "$ACR_LOGIN_SERVER/eduadmin-frontend:$IMAGE_TAG"
 
           kubectl get configmap eduadmin-config -n "$K8S_NAMESPACE"
-          kubectl get secrets student-db-secret acr-pull-secret -n "$K8S_NAMESPACE"
+          kubectl get secret student-db-secret acr-pull-secret -n "$K8S_NAMESPACE"
           kubectl get deployments -n "$K8S_NAMESPACE" -o wide
           kubectl get pods -n "$K8S_NAMESPACE" -o wide
           kubectl get services -n "$K8S_NAMESPACE"
           kubectl get events -n "$K8S_NAMESPACE" \
             --sort-by=.lastTimestamp | tail -n 20
 
-          echo "API image: $API_IMAGE"
-          echo "Frontend image: $FRONTEND_IMAGE"
+          echo "Verified API image: $API_IMAGE"
+          echo "Verified frontend image: $FRONTEND_IMAGE"
+
+      - name: Diagnostics on deployment failure
+        if: ${{ failure() }}
+        shell: bash
+        run: |
+          kubectl get deployments,pods,services -n "$K8S_NAMESPACE" -o wide || true
+          kubectl get events -n "$K8S_NAMESPACE" \
+            --sort-by=.lastTimestamp | tail -n 40 || true
+          kubectl describe deployment studentapi -n "$K8S_NAMESPACE" || true
+          kubectl logs deployment/studentapi -n "$K8S_NAMESPACE" \
+            --all-pods=true --tail=100 || true

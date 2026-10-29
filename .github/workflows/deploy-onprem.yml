@@ -20,7 +20,7 @@ env:
   K8S_NAMESPACE: student
   SQL_DATABASE: StudentDB
   ACR_LOGIN_SERVER: ${{ secrets.ACR_LOGIN_SERVER }}
-  SQL_SERVER: "10.193.182.70,1433"
+  SQL_SERVER: "192.168.159.1,1433"
 
 jobs:
   # --------------------------------------------------
@@ -92,7 +92,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          timeout 5 bash -c '</dev/tcp/10.193.182.70/1433'
+          timeout 5 bash -c '</dev/tcp/192.168.159.1/1433'
           echo "SQL Server TCP connectivity successful."
 
       - name: Generate DACPAC deployment report

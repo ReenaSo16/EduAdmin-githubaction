@@ -76,7 +76,7 @@ jobs:
 
   # 2. API SonarQube analysis
   api-sonarqube:
-    name: "02 - API SonarQube"
+    name: "02 - API SonarQube"        #Har GitHub Actions job ka apna workspace hota ha
     needs: api-build-test
     runs-on: [self-hosted, Linux, X64]
     timeout-minutes: 30
@@ -85,7 +85,7 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install .NET SDK
+      - name: Install .NET SDK      
         run: |
           set -e
           mkdir -p "$RUNNER_TEMP/dotnet"

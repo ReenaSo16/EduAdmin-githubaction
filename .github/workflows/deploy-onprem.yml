@@ -100,7 +100,7 @@ jobs:
         env:
           SQLSERVER_USERNAME: ${{ secrets.SQLSERVER_USERNAME }}
           SQLSERVER_PASSWORD: ${{ secrets.SQLSERVER_SA_PASSWORD }}
-          SQL_SERVER: "10.193.182.70,1433"
+          SQL_SERVER: "192.168.159.1,1433"
           SQL_DATABASE: StudentDB
         run: |
           set -euo pipefail

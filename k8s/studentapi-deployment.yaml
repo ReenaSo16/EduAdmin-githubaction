@@ -4,20 +4,32 @@ kind: Deployment
 metadata:
   name: studentapi
   namespace: student
+
 spec:
   replicas: 1
+
+  # Rolling Update Strategy
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1     #Allow one extra Pod
+      maxUnavailable: 0  #Don't intentionally reduce available replicas
+
   selector:
     matchLabels:
       app: studentapi
+
   template:
     metadata:
       labels:
         app: studentapi
+
     spec:
       containers:
         - name: studentapi
           image: reenaacr1.azurecr.io/eduadmin-api:latest
           imagePullPolicy: Always
+
           ports:
             - name: http
               containerPort: 5000

@@ -33,19 +33,43 @@ kind: Deployment
 metadata:
   name: studentapp
   namespace: student
+
 spec:
   replicas: 1
+
+  # Rolling Update Strategy
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+
   selector:
     matchLabels:
       app: studentapp
+
   template:
     metadata:
       labels:
         app: studentapp
+
     spec:
       containers:
         - name: studentapp
           image: reenaacr1.azurecr.io/eduadmin-frontend:latest
           imagePullPolicy: Always
+
           ports:
-            - containerPort: 80
+            - name: http
+              containerPort: 80
+
+          # Readiness Probe
+          readinessProbe:
+            httpGet:
+              path: /
+              port: 80
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 2
+            failureThreshold: 3
+

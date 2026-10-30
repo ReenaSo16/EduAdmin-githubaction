@@ -1,4 +1,7 @@
+
 namespace: student
+
+imagePullSecret: acr-pull-secret
 
 api:
   replicaCount: 1
@@ -10,6 +13,25 @@ api:
 
   containerPort: 5000
 
+  service:
+    name: studentapi-service
+    type: NodePort
+    port: 5000
+    targetPort: 5000
+    nodePort: 30081
+
+  resources:
+    requests:
+      cpu: 100m
+      memory: 128Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+  configMapName: eduadmin-config
+  secretName: eduadmin-db-secret
+  secretKey: ConnectionStrings__DefaultConnection
+
 frontend:
   replicaCount: 1
 
@@ -17,3 +39,20 @@ frontend:
     repository: reenaacr1.azurecr.io/eduadmin-frontend
     tag: "1ac17e6265ec7591ba18d3ec10116c0686b7fad6"
     pullPolicy: Always
+
+  containerPort: 80
+
+  service:
+    name: studentapp-service
+    type: NodePort
+    port: 80
+    targetPort: 80
+    nodePort: 30080
+
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 250m
+      memory: 256Mi

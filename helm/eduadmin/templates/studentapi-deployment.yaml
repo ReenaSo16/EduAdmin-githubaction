@@ -4,6 +4,14 @@ kind: Deployment
 metadata:
   name: studentapi
   namespace: {{ .Values.namespace }}
+  labels:
+    app: studentapi
+    app.kubernetes.io/name: studentapi
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name | quote }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace | quote }}
 
 spec:
   replicas: {{ .Values.api.replicaCount }}
@@ -25,7 +33,7 @@ spec:
 
     spec:
       imagePullSecrets:
-        - name: acr-pull-secret
+        - name: {{ .Values.imagePullSecret }}
 
       containers:
         - name: studentapi
@@ -38,26 +46,30 @@ spec:
 
           envFrom:
             - configMapRef:
-                name: eduadmin-config
+                name: {{ .Values.api.configMapName }}
 
           env:
             - name: ConnectionStrings__DefaultConnection
               valueFrom:
                 secretKeyRef:
-                  name: eduadmin-db-secret
-                  key: ConnectionStrings__DefaultConnection
+                  name: {{ .Values.api.secretName }}
+                  key: {{ .Values.api.secretKey }}
 
           resources:
             {{- toYaml .Values.api.resources | nindent 12 }}
 
           readinessProbe:
             tcpSocket:
-              port: 5000
+              port: {{ .Values.api.containerPort }}
             initialDelaySeconds: 15
             periodSeconds: 10
+            timeoutSeconds: 2
+            failureThreshold: 3
 
           livenessProbe:
             tcpSocket:
-              port: 5000
+              port: {{ .Values.api.containerPort }}
             initialDelaySeconds: 30
             periodSeconds: 20
+            timeoutSeconds: 2
+            failureThreshold: 3

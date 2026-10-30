@@ -1,11 +1,20 @@
+
 apiVersion: v1
 kind: Service
 metadata:
-  name: studentapp-service
+  name: {{ .Values.frontend.service.name }}
   namespace: {{ .Values.namespace }}
+  labels:
+    app: studentapp
+    app.kubernetes.io/name: studentapp
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name | quote }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace | quote }}
 
 spec:
-  type: NodePort
+  type: {{ .Values.frontend.service.type }}
 
   selector:
     app: studentapp
@@ -13,6 +22,6 @@ spec:
   ports:
     - name: http
       protocol: TCP
-      port: 80
-      targetPort: 80
-      nodePort: 30080
+      port: {{ .Values.frontend.service.port }}
+      targetPort: {{ .Values.frontend.service.targetPort }}
+      nodePort: {{ .Values.frontend.service.nodePort }}

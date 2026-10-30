@@ -4,6 +4,14 @@ kind: Deployment
 metadata:
   name: studentapp
   namespace: {{ .Values.namespace }}
+  labels:
+    app: studentapp
+    app.kubernetes.io/name: studentapp
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name | quote }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace | quote }}
 
 spec:
   replicas: {{ .Values.frontend.replicaCount }}
@@ -25,7 +33,7 @@ spec:
 
     spec:
       imagePullSecrets:
-        - name: acr-pull-secret
+        - name: {{ .Values.imagePullSecret }}
 
       containers:
         - name: studentapp
@@ -34,12 +42,15 @@ spec:
 
           ports:
             - name: http
-              containerPort: 80
+              containerPort: {{ .Values.frontend.containerPort }}
+
+          resources:
+            {{- toYaml .Values.frontend.resources | nindent 12 }}
 
           readinessProbe:
             httpGet:
               path: /
-              port: 80
+              port: {{ .Values.frontend.containerPort }}
             initialDelaySeconds: 5
             periodSeconds: 5
             timeoutSeconds: 2

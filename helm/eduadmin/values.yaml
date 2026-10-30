@@ -1,0 +1,19 @@
+namespace: student
+
+api:
+  replicaCount: 1
+
+  image:
+    repository: reenaacr1.azurecr.io/eduadmin-api
+    tag: "1ac17e6265ec7591ba18d3ec10116c0686b7fad6"
+    pullPolicy: Always
+
+  containerPort: 5000
+
+frontend:
+  replicaCount: 1
+
+  image:
+    repository: reenaacr1.azurecr.io/eduadmin-frontend
+    tag: "1ac17e6265ec7591ba18d3ec10116c0686b7fad6"
+    pullPolicy: Always

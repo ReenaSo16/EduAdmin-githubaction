@@ -28,7 +28,7 @@ spec:
       containers:
         - name: studentapp
           image: reenaso16/eduadmin-frontend:a3661e4984bbea3794af378f122294acaee62bdf
-          imagePullPolicy: Always
+          imagePullPolicy: {{ .Values.api.image.pullPolicy }}
 
           ports:
             - name: http

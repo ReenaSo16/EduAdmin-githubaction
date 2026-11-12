@@ -1038,7 +1038,7 @@ jobs:
           echo "Helm deployment completed."
 
       # ----------------------------------------
-      # Wait for application rollouts
+      # Wait for application rollout
       # ----------------------------------------
       - name: Wait for rollouts
         shell: bash

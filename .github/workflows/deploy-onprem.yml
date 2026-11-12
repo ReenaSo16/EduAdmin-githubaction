@@ -1016,7 +1016,7 @@ jobs:
           echo "Pull-secret inspection completed."
 
       # ----------------------------------------
-      # Deploy using Helm
+      # Deploy using Helm chart
       # ----------------------------------------
       - name: Deploy application using Helm
         shell: bash

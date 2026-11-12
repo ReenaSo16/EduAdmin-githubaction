@@ -1,6 +1,7 @@
 
 apiVersion: apps/v1
 kind: Deployment
+
 metadata:
   name: studentapp
   namespace: {{ .Values.namespace }}
@@ -9,9 +10,6 @@ metadata:
     app.kubernetes.io/name: studentapp
     app.kubernetes.io/instance: {{ .Release.Name }}
     app.kubernetes.io/managed-by: {{ .Release.Service }}
-  annotations:
-    meta.helm.sh/release-name: {{ .Release.Name | quote }}
-    meta.helm.sh/release-namespace: {{ .Release.Namespace | quote }}
 
 spec:
   replicas: {{ .Values.frontend.replicaCount }}
@@ -32,9 +30,6 @@ spec:
         app: studentapp
 
     spec:
-      imagePullSecrets:
-        - name: {{ .Values.imagePullSecret }}
-
       containers:
         - name: studentapp
           image: "{{ .Values.frontend.image.repository }}:{{ .Values.frontend.image.tag }}"

@@ -1,35 +1,7 @@
-# apiVersion: apps/v1
-# kind: Deployment
-
-# metadata:
-#   name: studentapp
-#   namespace: student
-
-# spec:
-#   replicas: 2
-
-#   selector:
-#     matchLabels:
-#       app: studentapp
-
-#   template:
-#     metadata:
-#       labels:
-#         app: studentapp
-
-#     spec:
-#       containers:
-#       - name: studentapp
-
-#         image: reenaso16/studentapp:v1
-#         imagePullPolicy: Always
-
-#         ports:
-#         - containerPort: 80
-
 
 apiVersion: apps/v1
 kind: Deployment
+
 metadata:
   name: studentapp
   namespace: student
@@ -37,7 +9,6 @@ metadata:
 spec:
   replicas: 1
 
-  # Rolling Update Strategy
   strategy:
     type: RollingUpdate
     rollingUpdate:
@@ -56,14 +27,13 @@ spec:
     spec:
       containers:
         - name: studentapp
-          image: reenaacr1.azurecr.io/eduadmin-frontend:latest
+          image: reenaso16/eduadmin-frontend:a3661e4984bbea3794af378f122294acaee62bdf
           imagePullPolicy: Always
 
           ports:
             - name: http
               containerPort: 80
 
-          # Readiness Probe
           readinessProbe:
             httpGet:
               path: /
@@ -72,4 +42,3 @@ spec:
             periodSeconds: 5
             timeoutSeconds: 2
             failureThreshold: 3
-

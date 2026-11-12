@@ -1,13 +1,14 @@
 
 namespace: student
 
-imagePullSecret: acr-pull-secret
+# Docker Hub repositories are public, so no imagePullSecret is required.
+# imagePullSecret: acr-pull-secret
 
 api:
   replicaCount: 1
 
   image:
-    repository: reenaacr1.azurecr.io/eduadmin-api
+    repository: reenaso16/eduadmin-api
     tag: "1ac17e6265ec7591ba18d3ec10116c0686b7fad6"
     pullPolicy: Always
 
@@ -36,7 +37,7 @@ frontend:
   replicaCount: 1
 
   image:
-    repository: reenaacr1.azurecr.io/eduadmin-frontend
+    repository: reenaso16/eduadmin-frontend
     tag: "1ac17e6265ec7591ba18d3ec10116c0686b7fad6"
     pullPolicy: Always
 

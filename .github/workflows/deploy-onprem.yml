@@ -670,10 +670,6 @@
 
 
 
-
-
-# with dockcer hub changes
-
 name: EduAdmin CD - On-Prem Kubernetes
 
 on:
@@ -683,6 +679,12 @@ on:
         description: "Full 40-character SHA from a successful CI run"
         required: true
         type: string
+
+      deploy_database:
+        description: "Deploy StudentDB DACPAC? Enable only for database schema changes."
+        required: true
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -699,16 +701,19 @@ env:
 jobs:
 
   # ==========================================
-  # JOB 1: Deploy Database DACPAC
+  # JOB 1: Deploy Database DACPAC (Optional)
   # ==========================================
   deploy-database:
     name: Deploy StudentDB DACPAC
+    if: ${{ inputs.deploy_database }}
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 30
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.image_tag }}
 
       - name: Validate input and DACPAC
         shell: bash
@@ -718,21 +723,22 @@ jobs:
           set -euo pipefail
 
           if [[ ! "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "ERROR: Enter a full 40-character lowercase commit SHA."
+            echo "ERROR: Invalid 40-character commit SHA."
             exit 1
           fi
 
           test -s Database/StudentDB.dacpac
           echo "DACPAC file found."
 
-      - name: Install .NET SDK locally
+      - name: Install .NET SDK
         shell: bash
         run: |
           set -euo pipefail
 
           mkdir -p "$HOME/.dotnet"
 
-          curl -fsSL --retry 3 https://dot.net/v1/dotnet-install.sh \
+          curl -fsSL --retry 3 \
+            https://dot.net/v1/dotnet-install.sh \
             -o "$RUNNER_TEMP/dotnet-install.sh"
 
           bash "$RUNNER_TEMP/dotnet-install.sh" \
@@ -751,7 +757,7 @@ jobs:
 
           mkdir -p "$RUNNER_TEMP/sqlpackage"
 
-          dotnet tool install \
+          "$HOME/.dotnet/dotnet" tool install \
             --tool-path "$RUNNER_TEMP/sqlpackage" \
             Microsoft.SqlPackage
 
@@ -770,14 +776,14 @@ jobs:
           test -n "$SQLSERVER_USERNAME"
           test -n "$SQLSERVER_PASSWORD"
 
-          echo "SQL credentials are configured."
+          echo "SQL credentials configured."
 
       - name: Check SQL Server connectivity
         shell: bash
         run: |
           set -euo pipefail
 
-          timeout 5 bash -c '</dev/tcp/192.168.159.1/1433'
+          timeout 10 bash -c '</dev/tcp/192.168.159.1/1433'
 
           echo "SQL Server connectivity successful."
 
@@ -801,8 +807,9 @@ jobs:
             /TargetTrustServerCertificate:True \
             /OutputPath:"$RUNNER_TEMP/StudentDB-deploy-report.xml"
 
-          echo "Deployment report generated."
-          echo "Review the report and back up StudentDB before publishing."
+          test -s "$RUNNER_TEMP/StudentDB-deploy-report.xml"
+
+          echo "DACPAC deployment report generated."
 
       - name: Publish DACPAC
         shell: bash
@@ -828,21 +835,29 @@ jobs:
 
   # ==========================================
   # JOB 2: Deploy API and Frontend using Helm
+  # Runs when database job succeeds OR is skipped
   # ==========================================
   deploy-kubernetes:
     name: Deploy API and Frontend using Helm
     needs: deploy-database
-    runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 30
 
-    env:
-      K8S_NAMESPACE: student
+    if: >-
+      ${{
+        always() &&
+        (
+          needs.deploy-database.result == 'success' ||
+          needs.deploy-database.result == 'skipped'
+        )
+      }}
+
+    runs-on: [self-hosted, linux, x64]
+    timeout-minutes: 45
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: main
+          ref: ${{ inputs.image_tag }}
 
       # ----------------------------------------
       # Validate SHA and tools
@@ -882,22 +897,24 @@ jobs:
           verify_image() {
             local repository="$1"
 
-            echo "Checking Docker Hub image: $repository:$IMAGE_TAG"
+            echo "Checking $repository:$IMAGE_TAG"
 
             local token
-            token=$(curl -fsSL \
+            token=$(curl -fsSL --retry 3 \
               "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repository}:pull" \
               | jq -er '.token')
 
             local status
-            status=$(curl -sSL -o /dev/null -w "%{http_code}" \
+            status=$(curl -sSL --retry 3 \
+              -o /dev/null -w "%{http_code}" \
               -H "Authorization: Bearer $token" \
               -H "Accept: application/vnd.oci.image.index.v1+json, application/vnd.docker.distribution.manifest.list.v2+json, application/vnd.oci.image.manifest.v1+json, application/vnd.docker.distribution.manifest.v2+json" \
               "https://registry-1.docker.io/v2/${repository}/manifests/${IMAGE_TAG}")
 
             if [[ "$status" != "200" ]]; then
-              echo "ERROR: Image not found or inaccessible: $repository:$IMAGE_TAG"
-              echo "Docker Hub returned HTTP $status"
+              echo "ERROR: Image not found or inaccessible."
+              echo "Repository: $repository"
+              echo "HTTP status: $status"
               return 1
             fi
 
@@ -907,7 +924,7 @@ jobs:
           verify_image "reenaso16/eduadmin-api"
           verify_image "reenaso16/eduadmin-frontend"
 
-          echo "Both Docker Hub images are available."
+          echo "Both Docker Hub images verified."
 
       # ----------------------------------------
       # Validate and render Helm chart
@@ -939,7 +956,7 @@ jobs:
             exit 1
           fi
 
-          echo "Helm chart validation successful."
+          echo "Helm validation successful."
 
       # ----------------------------------------
       # Check Kubernetes access
@@ -951,17 +968,7 @@ jobs:
 
           kubectl cluster-info
           kubectl get nodes
-
-      # ----------------------------------------
-      # Ensure namespace exists
-      # ----------------------------------------
-      - name: Ensure namespace exists
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          kubectl create namespace "$K8S_NAMESPACE" \
-            --dry-run=client -o yaml | kubectl apply -f -
+          kubectl get namespace "$K8S_NAMESPACE"
 
       # ----------------------------------------
       # Apply ConfigMap
@@ -998,25 +1005,7 @@ jobs:
           echo "Database Secret created or updated."
 
       # ----------------------------------------
-      # Inspect existing pull-secret configuration
-      # ----------------------------------------
-      - name: Inspect existing Deployment pull secrets
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          echo "Existing API pull secrets:"
-          kubectl get deployment studentapi -n "$K8S_NAMESPACE" \
-            -o jsonpath='{.spec.template.spec.imagePullSecrets}{"\n"}' || true
-
-          echo "Existing frontend pull secrets:"
-          kubectl get deployment studentapp -n "$K8S_NAMESPACE" \
-            -o jsonpath='{.spec.template.spec.imagePullSecrets}{"\n"}' || true
-
-          echo "Pull-secret inspection completed."
-
-      # ----------------------------------------
-      # Deploy using Helm chart
+      # Deploy using Helm
       # ----------------------------------------
       - name: Deploy application using Helm
         shell: bash
@@ -1025,7 +1014,7 @@ jobs:
         run: |
           set -euo pipefail
 
-          echo "Deploying EduAdmin with Docker Hub images."
+          echo "Deploying EduAdmin using Docker Hub images."
           echo "Image tag: $IMAGE_TAG"
 
           helm upgrade --install eduadmin ./helm/eduadmin \
@@ -1033,12 +1022,12 @@ jobs:
             --set-string api.image.tag="$IMAGE_TAG" \
             --set-string frontend.image.tag="$IMAGE_TAG" \
             --wait \
-            --timeout 10m
+            --timeout 30m
 
           echo "Helm deployment completed."
 
       # ----------------------------------------
-      # Wait for application rollout
+      # Wait for application rollouts
       # ----------------------------------------
       - name: Wait for rollouts
         shell: bash
@@ -1090,13 +1079,13 @@ jobs:
             exit 1
           fi
 
-          helm status eduadmin -n "$K8S_NAMESPACE"
-
           kubectl get configmap eduadmin-config -n "$K8S_NAMESPACE"
           kubectl get secret eduadmin-db-secret -n "$K8S_NAMESPACE"
 
           kubectl get deployments,pods,services \
             -n "$K8S_NAMESPACE" -o wide
+
+          helm status eduadmin -n "$K8S_NAMESPACE"
 
           kubectl get events -n "$K8S_NAMESPACE" \
             --sort-by=.lastTimestamp | tail -n 20

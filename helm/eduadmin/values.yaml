@@ -9,7 +9,7 @@ api:
 
   image:
     repository: reenaso16/eduadmin-api
-    tag: "1ac17e6265ec7591ba18d3ec10116c0686b7fad6"
+    tag: "a3661e4984bbea3794af378f122294acaee62bdf"
     pullPolicy: Always
 
   containerPort: 5000
@@ -38,7 +38,7 @@ frontend:
 
   image:
     repository: reenaso16/eduadmin-frontend
-    tag: "1ac17e6265ec7591ba18d3ec10116c0686b7fad6"
+    tag: "a3661e4984bbea3794af378f122294acaee62bdf"
     pullPolicy: Always
 
   containerPort: 80
@@ -57,3 +57,8 @@ frontend:
     limits:
       cpu: 250m
       memory: 256Mi
+
+configMap:
+  DB_NAME: "StudentDB"
+  DB_PORT: "1433"
+  ASPNETCORE_ENVIRONMENT: "Production"    

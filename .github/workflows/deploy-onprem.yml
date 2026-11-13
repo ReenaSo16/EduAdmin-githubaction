@@ -713,7 +713,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.image_tag }}
+          ref: main
 
       - name: Validate input and DACPAC
         shell: bash
@@ -857,7 +857,7 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
-          ref: ${{ inputs.image_tag }}
+          ref: main
 
       # ----------------------------------------
       # Validate SHA and tools

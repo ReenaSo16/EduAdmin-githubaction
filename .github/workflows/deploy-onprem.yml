@@ -927,7 +927,7 @@ jobs:
           echo "Both Docker Hub images verified."
 
       # ----------------------------------------
-      # Validate and render Helm chart
+      # Validate and render Helm 
       # ----------------------------------------
       - name: Validate Helm chart
         shell: bash

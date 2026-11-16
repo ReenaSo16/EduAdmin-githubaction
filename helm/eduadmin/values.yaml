@@ -9,7 +9,7 @@ api:
 
   image:
     repository: reenaso16/eduadmin-api
-    tag: "a3661e4984bbea3794af378f122294acaee62bdf"
+    tag: "2e2fac22653bc5bb0687231cfd24640770768d08"
     pullPolicy: Always
 
   containerPort: 5000
@@ -38,7 +38,7 @@ frontend:
 
   image:
     repository: reenaso16/eduadmin-frontend
-    tag: "a3661e4984bbea3794af378f122294acaee62bdf"
+    tag: "2e2fac22653bc5bb0687231cfd24640770768d08"
     pullPolicy: Always
 
   containerPort: 80

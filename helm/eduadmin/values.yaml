@@ -62,3 +62,5 @@ configMap:
   DB_NAME: "StudentDB"
   DB_PORT: "1433"
   ASPNETCORE_ENVIRONMENT: "Production"    
+
+# GitOps author identity update

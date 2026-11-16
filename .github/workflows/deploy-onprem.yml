@@ -670,27 +670,30 @@
 
 
 
-name: EduAdmin CD - On-Prem Kubernetes
+name: EduAdmin CD - GitOps Argo CD
 
+# CD is triggered manually. CI.yml remains unchanged.
 on:
   workflow_dispatch:
     inputs:
       image_tag:
-        description: "Full 40-character SHA from a successful CI run"
+        description: "Full 40-character Docker image SHA"
         required: true
         type: string
 
       deploy_database:
-        description: "Deploy StudentDB DACPAC? Enable only for database schema changes."
+        description: "Deploy StudentDB DACPAC? Select only for DB changes."
         required: true
         type: boolean
         default: false
 
+# Required because this workflow commits Helm values back to GitHub.
 permissions:
-  contents: read
+  contents: write
 
+# Prevent two CD runs from updating the same values file simultaneously.
 concurrency:
-  group: eduadmin-onprem-cd
+  group: eduadmin-gitops-cd
   cancel-in-progress: false
 
 env:
@@ -700,12 +703,15 @@ env:
 
 jobs:
 
-  # ==========================================
-  # JOB 1: Deploy Database DACPAC (Optional)
-  # ==========================================
+  # ==========================================================
+  # JOB 1: OPTIONAL DATABASE DEPLOYMENT
+  # This job is skipped when deploy_database is false.
+  # Database schema changes are intentionally separate from
+  # the Argo CD application deployment.
+  # ==========================================================
   deploy-database:
     name: Deploy StudentDB DACPAC
-    if: ${{ inputs.deploy_database }}
+    if: ${{ inputs.deploy_database == true }}
     runs-on: [self-hosted, linux, x64]
     timeout-minutes: 30
 
@@ -715,7 +721,7 @@ jobs:
         with:
           ref: main
 
-      - name: Validate input and DACPAC
+      - name: Validate SHA and DACPAC
         shell: bash
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
@@ -723,12 +729,12 @@ jobs:
           set -euo pipefail
 
           if [[ ! "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "ERROR: Invalid 40-character commit SHA."
+            echo "ERROR: Invalid image SHA."
             exit 1
           fi
 
           test -s Database/StudentDB.dacpac
-          echo "DACPAC file found."
+          echo "DACPAC found."
 
       - name: Install .NET SDK
         shell: bash
@@ -809,7 +815,7 @@ jobs:
 
           test -s "$RUNNER_TEMP/StudentDB-deploy-report.xml"
 
-          echo "DACPAC deployment report generated."
+          echo "DACPAC report generated."
 
       - name: Publish DACPAC
         shell: bash
@@ -833,14 +839,18 @@ jobs:
 
           echo "DACPAC publish completed."
 
-  # ==========================================
-  # JOB 2: Deploy API and Frontend using Helm
-  # Runs when database job succeeds OR is skipped
-  # ==========================================
-  deploy-kubernetes:
-    name: Deploy API and Frontend using Helm
+  # ==========================================================
+  # JOB 2: GITOPS CD
+  #
+  # No direct kubectl apply or helm upgrade.
+  # This job updates Git. Argo CD performs deployment.
+  # ==========================================================
+  gitops-deploy:
+    name: Update Helm Values for Argo CD
     needs: deploy-database
 
+    # Run when optional DB job succeeded or was skipped.
+    # Never update application images if DB deployment failed.
     if: >-
       ${{
         always() &&
@@ -851,18 +861,17 @@ jobs:
       }}
 
     runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 45
+    timeout-minutes: 20
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           ref: main
+          persist-credentials: true
 
-      # ----------------------------------------
-      # Validate SHA and tools
-      # ----------------------------------------
-      - name: Validate tools and image SHA
+      # Validate input before changing repository content.
+      - name: Validate image SHA and tools
         shell: bash
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
@@ -870,23 +879,23 @@ jobs:
           set -euo pipefail
 
           if [[ ! "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "ERROR: Invalid image SHA."
+            echo "ERROR: Expected a 40-character lowercase SHA."
             exit 1
           fi
 
-          command -v kubectl
-          command -v helm
           command -v curl
           command -v jq
+          command -v helm
+          command -v python3
+          command -v git
 
           test -s helm/eduadmin/Chart.yaml
           test -s helm/eduadmin/values.yaml
 
-          echo "Tools and Helm chart validated."
+          echo "Input and tools validated."
 
-      # ----------------------------------------
-      # Verify both public Docker Hub images
-      # ----------------------------------------
+      # Check both Docker Hub tags before committing a deployment.
+      # This prevents Argo CD from deploying nonexistent images.
       - name: Verify Docker Hub images
         shell: bash
         env:
@@ -896,15 +905,15 @@ jobs:
 
           verify_image() {
             local repository="$1"
+            local token
+            local status
 
             echo "Checking $repository:$IMAGE_TAG"
 
-            local token
             token=$(curl -fsSL --retry 3 \
               "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repository}:pull" \
               | jq -er '.token')
 
-            local status
             status=$(curl -sSL --retry 3 \
               -o /dev/null -w "%{http_code}" \
               -H "Authorization: Bearer $token" \
@@ -912,23 +921,73 @@ jobs:
               "https://registry-1.docker.io/v2/${repository}/manifests/${IMAGE_TAG}")
 
             if [[ "$status" != "200" ]]; then
-              echo "ERROR: Image not found or inaccessible."
+              echo "ERROR: Image verification failed."
               echo "Repository: $repository"
               echo "HTTP status: $status"
               return 1
             fi
 
-            echo "Image exists: $repository:$IMAGE_TAG"
+            echo "Image verified: $repository:$IMAGE_TAG"
           }
 
           verify_image "reenaso16/eduadmin-api"
           verify_image "reenaso16/eduadmin-frontend"
 
-          echo "Both Docker Hub images verified."
+      # Update only the two image tags.
+      # Python standard library is used so no extra YAML package
+      # needs to be installed on the self-hosted runner.
+      #
+      # The script requires the expected Helm values structure and
+      # refuses to proceed if either image tag cannot be located.
+      - name: Update Helm values.yaml
+        shell: bash
+        env:
+          IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
 
-      # ----------------------------------------
-      # Validate and render Helm 
-      # ----------------------------------------
+          python3 - <<'PY'
+          import os
+          import re
+          from pathlib import Path
+
+          path = Path("helm/eduadmin/values.yaml")
+          tag = os.environ["IMAGE_TAG"]
+          content = path.read_text()
+
+          # Match the image tag within the correct top-level section.
+          # This avoids changing unrelated YAML fields.
+          for section in ("api", "frontend"):
+              pattern = (
+                  rf"(?ms)^({section}:\n"
+                  rf"(?:(?!^[^\s#]).*\n)*?"
+                  rf"  image:\n"
+                  rf"(?:(?!^  [^\s#]).*\n)*?"
+                  rf"    tag:\s*)[^\n#]+"
+              )
+
+              updated, count = re.subn(
+                  pattern,
+                  lambda match: match.group(1) + f'"{tag}"',
+                  content,
+                  count=1,
+              )
+
+              if count != 1:
+                  raise RuntimeError(
+                      f"Cannot locate {section}.image.tag"
+                  )
+
+              content = updated
+
+          path.write_text(content)
+          print("Updated API and frontend image tags.")
+          PY
+
+          git diff -- helm/eduadmin/values.yaml
+
+      # Render the updated chart before pushing the change.
+      # Argo CD will use the same chart and values from Git.
       - name: Validate Helm chart
         shell: bash
         env:
@@ -940,8 +999,6 @@ jobs:
 
           helm template eduadmin ./helm/eduadmin \
             --namespace "$K8S_NAMESPACE" \
-            --set-string api.image.tag="$IMAGE_TAG" \
-            --set-string frontend.image.tag="$IMAGE_TAG" \
             > "$RUNNER_TEMP/eduadmin-rendered.yaml"
 
           grep -Fq "reenaso16/eduadmin-api:$IMAGE_TAG" \
@@ -952,176 +1009,56 @@ jobs:
 
           if grep -Eq 'reenaacr1\.azurecr\.io|acr-pull-secret|imagePullSecrets' \
             "$RUNNER_TEMP/eduadmin-rendered.yaml"; then
-            echo "ERROR: Old ACR or imagePullSecrets configuration found."
+            echo "ERROR: Unexpected old ACR configuration."
             exit 1
           fi
 
           echo "Helm validation successful."
 
-      # ----------------------------------------
-      # Check Kubernetes access
-      # ----------------------------------------
-      - name: Check Kubernetes connection
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          kubectl cluster-info
-          kubectl get nodes
-          kubectl get namespace "$K8S_NAMESPACE"
-
-      # ----------------------------------------
-      # Apply ConfigMap
-      # ----------------------------------------
-      - name: Apply ConfigMap
-        shell: bash
-        run: |
-          set -euo pipefail
-
-          kubectl apply -f k8s/configmap.yaml
-
-      # ----------------------------------------
-      # Create or update database Secret
-      # ----------------------------------------
-      - name: Create or update database Secret
-        shell: bash
-        env:
-          STUDENT_DB_CONNECTION: ${{ secrets.STUDENT_DB_CONNECTION }}
-        run: |
-          set -euo pipefail
-          set +x
-          umask 077
-
-          if [[ -z "$STUDENT_DB_CONNECTION" ]]; then
-            echo "ERROR: STUDENT_DB_CONNECTION secret is missing."
-            exit 1
-          fi
-
-          kubectl create secret generic eduadmin-db-secret \
-            --namespace "$K8S_NAMESPACE" \
-            --from-literal="ConnectionStrings__DefaultConnection=$STUDENT_DB_CONNECTION" \
-            --dry-run=client -o yaml | kubectl apply -f -
-
-          echo "Database Secret created or updated."
-
-      # ----------------------------------------
-      # Deploy using Helm
-      # ----------------------------------------
-      - name: Deploy application using Helm
+      # Commit only values.yaml, never secrets or generated files.
+      # If the tags are already correct, avoid an empty commit.
+      - name: Commit and push GitOps changes
         shell: bash
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
 
-          echo "Deploying EduAdmin using Docker Hub images."
-          echo "Image tag: $IMAGE_TAG"
+          git config user.name "github-actions[bot]"
+          git config user.email \
+            "41898282+github-actions[bot]@users.noreply.github.com"
 
-          helm upgrade --install eduadmin ./helm/eduadmin \
-            --namespace "$K8S_NAMESPACE" \
-            --set-string api.image.tag="$IMAGE_TAG" \
-            --set-string frontend.image.tag="$IMAGE_TAG" \
-            --wait \
-            --timeout 30m
+          git add helm/eduadmin/values.yaml
 
-          echo "Helm deployment completed."
+          if git diff --cached --quiet; then
+            echo "No changes required. Images already configured."
+            exit 0
+          fi
 
-      # ----------------------------------------
-      # Wait for application rollouts
-      # ----------------------------------------
-      - name: Wait for rollouts
-        shell: bash
-        run: |
-          set -euo pipefail
+          git commit -m "gitops: deploy EduAdmin $IMAGE_TAG"
 
-          kubectl rollout status deployment/studentapi \
-            --namespace "$K8S_NAMESPACE" \
-            --timeout=300s
+          # Fail rather than force-push if main changed during the run.
+          # This protects concurrent repository changes.
+          git push origin HEAD:main
 
-          kubectl rollout status deployment/studentapp \
-            --namespace "$K8S_NAMESPACE" \
-            --timeout=300s
+          echo "Helm values pushed successfully."
 
-          echo "Both application rollouts successful."
-
-      # ----------------------------------------
-      # Verify deployed resources and image tags
-      # ----------------------------------------
-      - name: Verify deployed resources
+      - name: GitOps deployment summary
         shell: bash
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
 
-          API_IMAGE=$(kubectl get deployment studentapi \
-            -n "$K8S_NAMESPACE" \
-            -o jsonpath='{.spec.template.spec.containers[?(@.name=="studentapi")].image}')
-
-          FRONTEND_IMAGE=$(kubectl get deployment studentapp \
-            -n "$K8S_NAMESPACE" \
-            -o jsonpath='{.spec.template.spec.containers[?(@.name=="studentapp")].image}')
-
-          EXPECTED_API_IMAGE="reenaso16/eduadmin-api:$IMAGE_TAG"
-          EXPECTED_FRONTEND_IMAGE="reenaso16/eduadmin-frontend:$IMAGE_TAG"
-
-          if [[ "$API_IMAGE" != "$EXPECTED_API_IMAGE" ]]; then
-            echo "ERROR: API image mismatch."
-            echo "Expected: $EXPECTED_API_IMAGE"
-            echo "Actual: $API_IMAGE"
-            exit 1
-          fi
-
-          if [[ "$FRONTEND_IMAGE" != "$EXPECTED_FRONTEND_IMAGE" ]]; then
-            echo "ERROR: Frontend image mismatch."
-            echo "Expected: $EXPECTED_FRONTEND_IMAGE"
-            echo "Actual: $FRONTEND_IMAGE"
-            exit 1
-          fi
-
-          kubectl get configmap eduadmin-config -n "$K8S_NAMESPACE"
-          kubectl get secret eduadmin-db-secret -n "$K8S_NAMESPACE"
-
-          kubectl get deployments,pods,services \
-            -n "$K8S_NAMESPACE" -o wide
-
-          helm status eduadmin -n "$K8S_NAMESPACE"
-
-          kubectl get events -n "$K8S_NAMESPACE" \
-            --sort-by=.lastTimestamp | tail -n 20
-
-          echo "API image: $API_IMAGE"
-          echo "Frontend image: $FRONTEND_IMAGE"
-          echo "Deployment verification successful."
-
-      # ----------------------------------------
-      # Diagnostics on failure
-      # ----------------------------------------
-      - name: Diagnostics on deployment failure
-        if: ${{ failure() }}
-        shell: bash
-        run: |
-          echo "Deployment diagnostics..."
-
-          kubectl get deployments,pods,services \
-            -n "$K8S_NAMESPACE" -o wide || true
-
-          kubectl get events -n "$K8S_NAMESPACE" \
-            --sort-by=.lastTimestamp | tail -n 40 || true
-
-          kubectl describe deployment studentapi \
-            -n "$K8S_NAMESPACE" || true
-
-          kubectl describe deployment studentapp \
-            -n "$K8S_NAMESPACE" || true
-
-          echo "API pod logs:"
-          kubectl logs -n "$K8S_NAMESPACE" \
-            -l app=studentapi --all-containers=true --tail=100 || true
-
-          echo "Frontend pod logs:"
-          kubectl logs -n "$K8S_NAMESPACE" \
-            -l app=studentapp --all-containers=true --tail=100 || true
-
-          echo "Helm release status:"
-          helm status eduadmin -n "$K8S_NAMESPACE" || true
+          echo "=================================="
+          echo "EduAdmin GitOps CD completed"
+          echo "=================================="
+          echo "API image: reenaso16/eduadmin-api:$IMAGE_TAG"
+          echo "Frontend image: reenaso16/eduadmin-frontend:$IMAGE_TAG"
+          echo "Git branch: main"
+          echo "Helm path: helm/eduadmin"
+          echo "Argo CD application: eduadmin"
+          echo "Kubernetes namespace: student"
+          echo ""
+          echo "Argo CD will reconcile the desired Git state."
+          echo "Check Argo CD UI for actual deployment health."

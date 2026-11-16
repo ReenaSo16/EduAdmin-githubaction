@@ -839,18 +839,14 @@ jobs:
 
           echo "DACPAC publish completed."
 
-  # ==========================================================
-  # JOB 2: GITOPS CD
-  #
-  # No direct kubectl apply or helm upgrade.
-  # This job updates Git. Argo CD performs deployment.
-  # ==========================================================
+
+  # ==========================================
+  # JOB 2: GitOps Deployment using Argo CD
+  # ==========================================
   gitops-deploy:
     name: Update Helm Values for Argo CD
     needs: deploy-database
 
-    # Run when optional DB job succeeded or was skipped.
-    # Never update application images if DB deployment failed.
     if: >-
       ${{
         always() &&
@@ -861,17 +857,22 @@ jobs:
       }}
 
     runs-on: [self-hosted, linux, x64]
-    timeout-minutes: 20
+    timeout-minutes: 45
 
     steps:
+      # ----------------------------------------
+      # Checkout repository
+      # ----------------------------------------
       - name: Checkout repository
         uses: actions/checkout@v4
         with:
           ref: main
           persist-credentials: true
 
-      # Validate input before changing repository content.
-      - name: Validate image SHA and tools
+      # ----------------------------------------
+      # Validate SHA and required tools
+      # ----------------------------------------
+      - name: Validate tools and image SHA
         shell: bash
         env:
           IMAGE_TAG: ${{ inputs.image_tag }}
@@ -879,23 +880,24 @@ jobs:
           set -euo pipefail
 
           if [[ ! "$IMAGE_TAG" =~ ^[0-9a-f]{40}$ ]]; then
-            echo "ERROR: Expected a 40-character lowercase SHA."
+            echo "ERROR: Invalid image SHA."
             exit 1
           fi
 
+          command -v helm
           command -v curl
           command -v jq
-          command -v helm
-          command -v python3
+          command -v sed
           command -v git
 
           test -s helm/eduadmin/Chart.yaml
           test -s helm/eduadmin/values.yaml
 
-          echo "Input and tools validated."
+          echo "Tools and Helm chart validated."
 
-      # Check both Docker Hub tags before committing a deployment.
-      # This prevents Argo CD from deploying nonexistent images.
+      # ----------------------------------------
+      # Verify Docker Hub images
+      # ----------------------------------------
       - name: Verify Docker Hub images
         shell: bash
         env:
@@ -905,15 +907,15 @@ jobs:
 
           verify_image() {
             local repository="$1"
-            local token
-            local status
 
             echo "Checking $repository:$IMAGE_TAG"
 
+            local token
             token=$(curl -fsSL --retry 3 \
               "https://auth.docker.io/token?service=registry.docker.io&scope=repository:${repository}:pull" \
               | jq -er '.token')
 
+            local status
             status=$(curl -sSL --retry 3 \
               -o /dev/null -w "%{http_code}" \
               -H "Authorization: Bearer $token" \
@@ -921,24 +923,23 @@ jobs:
               "https://registry-1.docker.io/v2/${repository}/manifests/${IMAGE_TAG}")
 
             if [[ "$status" != "200" ]]; then
-              echo "ERROR: Image verification failed."
+              echo "ERROR: Image not found."
               echo "Repository: $repository"
               echo "HTTP status: $status"
               return 1
             fi
 
-            echo "Image verified: $repository:$IMAGE_TAG"
+            echo "Image exists: $repository:$IMAGE_TAG"
           }
 
           verify_image "reenaso16/eduadmin-api"
           verify_image "reenaso16/eduadmin-frontend"
 
-      # Update only the two image tags.
-      # Python standard library is used so no extra YAML package
-      # needs to be installed on the self-hosted runner.
-      #
-      # The script requires the expected Helm values structure and
-      # refuses to proceed if either image tag cannot be located.
+          echo "Both Docker Hub images verified."
+
+      # ----------------------------------------
+      # Update API and Frontend tags using sed
+      # ----------------------------------------
       - name: Update Helm values.yaml
         shell: bash
         env:
@@ -946,48 +947,32 @@ jobs:
         run: |
           set -euo pipefail
 
-          python3 - <<'PY'
-          import os
-          import re
-          from pathlib import Path
+          VALUES_FILE="helm/eduadmin/values.yaml"
 
-          path = Path("helm/eduadmin/values.yaml")
-          tag = os.environ["IMAGE_TAG"]
-          content = path.read_text()
+          # Update API image tag only
+          sed -i '/^api:/,/^frontend:/ s/^\([[:space:]]*tag:[[:space:]]*\).*/\1"'"$IMAGE_TAG"'"/' "$VALUES_FILE"
 
-          # Match the image tag within the correct top-level section.
-          # This avoids changing unrelated YAML fields.
-          for section in ("api", "frontend"):
-              pattern = (
-                  rf"(?ms)^({section}:\n"
-                  rf"(?:(?!^[^\s#]).*\n)*?"
-                  rf"  image:\n"
-                  rf"(?:(?!^  [^\s#]).*\n)*?"
-                  rf"    tag:\s*)[^\n#]+"
-              )
+          # Update Frontend image tag only
+          sed -i '/^frontend:/,$ s/^\([[:space:]]*tag:[[:space:]]*\).*/\1"'"$IMAGE_TAG"'"/' "$VALUES_FILE"
 
-              updated, count = re.subn(
-                  pattern,
-                  lambda match: match.group(1) + f'"{tag}"',
-                  content,
-                  count=1,
-              )
+          # Verify both image tags were updated
+          COUNT=$(grep -Ec "^[[:space:]]+tag: \"$IMAGE_TAG\"$" "$VALUES_FILE")
 
-              if count != 1:
-                  raise RuntimeError(
-                      f"Cannot locate {section}.image.tag"
-                  )
+          if [[ "$COUNT" -ne 2 ]]; then
+            echo "ERROR: Expected exactly 2 updated image tags."
+            exit 1
+          fi
 
-              content = updated
+          echo "Both image tags updated successfully."
 
-          path.write_text(content)
-          print("Updated API and frontend image tags.")
-          PY
+          grep -A5 '^api:' "$VALUES_FILE"
+          grep -A5 '^frontend:' "$VALUES_FILE"
 
-          git diff -- helm/eduadmin/values.yaml
+          git diff -- "$VALUES_FILE"
 
-      # Render the updated chart before pushing the change.
-      # Argo CD will use the same chart and values from Git.
+      # ----------------------------------------
+      # Validate Helm using updated values.yaml
+      # ----------------------------------------
       - name: Validate Helm chart
         shell: bash
         env:
@@ -1001,22 +986,31 @@ jobs:
             --namespace "$K8S_NAMESPACE" \
             > "$RUNNER_TEMP/eduadmin-rendered.yaml"
 
+          echo "Checking rendered API image..."
+
           grep -Fq "reenaso16/eduadmin-api:$IMAGE_TAG" \
             "$RUNNER_TEMP/eduadmin-rendered.yaml"
+
+          echo "API image verified."
+
+          echo "Checking rendered Frontend image..."
 
           grep -Fq "reenaso16/eduadmin-frontend:$IMAGE_TAG" \
             "$RUNNER_TEMP/eduadmin-rendered.yaml"
 
+          echo "Frontend image verified."
+
           if grep -Eq 'reenaacr1\.azurecr\.io|acr-pull-secret|imagePullSecrets' \
             "$RUNNER_TEMP/eduadmin-rendered.yaml"; then
-            echo "ERROR: Unexpected old ACR configuration."
+            echo "ERROR: Old ACR configuration found."
             exit 1
           fi
 
           echo "Helm validation successful."
 
-      # Commit only values.yaml, never secrets or generated files.
-      # If the tags are already correct, avoid an empty commit.
+      # ----------------------------------------
+      # Commit and push GitOps changes
+      # ----------------------------------------
       - name: Commit and push GitOps changes
         shell: bash
         env:
@@ -1031,18 +1025,19 @@ jobs:
           git add helm/eduadmin/values.yaml
 
           if git diff --cached --quiet; then
-            echo "No changes required. Images already configured."
+            echo "No changes required."
             exit 0
           fi
 
           git commit -m "gitops: deploy EduAdmin $IMAGE_TAG"
 
-          # Fail rather than force-push if main changed during the run.
-          # This protects concurrent repository changes.
           git push origin HEAD:main
 
-          echo "Helm values pushed successfully."
+          echo "GitOps changes pushed successfully."
 
+      # ----------------------------------------
+      # GitOps deployment summary
+      # ----------------------------------------
       - name: GitOps deployment summary
         shell: bash
         env:
@@ -1053,12 +1048,12 @@ jobs:
           echo "=================================="
           echo "EduAdmin GitOps CD completed"
           echo "=================================="
+
           echo "API image: reenaso16/eduadmin-api:$IMAGE_TAG"
           echo "Frontend image: reenaso16/eduadmin-frontend:$IMAGE_TAG"
           echo "Git branch: main"
           echo "Helm path: helm/eduadmin"
           echo "Argo CD application: eduadmin"
           echo "Kubernetes namespace: student"
-          echo ""
-          echo "Argo CD will reconcile the desired Git state."
-          echo "Check Argo CD UI for actual deployment health."
+
+          echo "Argo CD will automatically sync Git changes."
